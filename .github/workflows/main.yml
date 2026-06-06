@@ -1,0 +1,522 @@
+name: 一键越狱插件云编译
+
+on:
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: macos-13
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Theos
+        run: |
+          git clone --depth 1 https://github.com/theos/theos.git $HOME/theos
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: 安装 SDK
+        run: |
+          git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git $HOME/ios-sdks
+          mkdir -p $HOME/theos/sdks
+          cp -r $HOME/ios-sdks/iPhoneOS16.5.sdk $HOME/theos/sdks/ 2>/dev/null || \
+          cp -r $HOME/ios-sdks/iPhoneOS15.0.sdk $HOME/theos/sdks/
+
+      - name: 创建插件源码
+        run: |
+          mkdir -p layout/Library/PreferenceBundles/VintedIsoUI.bundle
+          mkdir -p vintedisoui
+
+          # Makefile
+          cat > Makefile << 'MAKEFILE_EOF'
+          TARGET := iphone:clang:latest:15.0
+          INSTALL_TARGET_PROCESSES = Vinted
+          ARCHS = arm64 arm64e
+          include $(THEOS)/makefiles/common.mk
+          TWEAK_NAME = VintedIsolator
+          VintedIsolator_FILES = Tweak.x
+          VintedIsolator_FRAMEWORKS = UIKit Security Foundation
+          VintedIsolator_CFLAGS = -fobjc-arc
+          include $(THEOS)/makefiles/tweak.mk
+          SUBPROJECTS += vintedisoui
+          include $(THEOS)/makefiles/aggregate.mk
+          MAKEFILE_EOF
+
+          # Control
+          cat > control << 'CONTROL_EOF'
+          Package: com.vinted.isolator
+          Name: Vinted 多分身隔离系统
+          Depends: firmware (>= 15.0), mobilesubstrate, preferenceloader
+          Version: 1.0.0
+          Architecture: iphoneos-arm64
+          Description: 针对Vinted的多开反指纹工具，支持无限分身与IP监控
+          Maintainer: VintedTeam
+          Author: VintedTeam
+          Section: Tweaks
+          CONTROL_EOF
+
+          # Plist filter
+          cat > VintedIsolator.plist << 'PLIST_EOF'
+          {
+            Filter = {
+              Bundles = (
+                "fr.vinted.vinted",
+                "com.vinted.app"
+              );
+              Executables = (
+                "Vinted"
+              );
+            };
+          }
+          PLIST_EOF
+
+          # Tweak.x 完整版
+          cat > Tweak.x << 'TWEAK_EOF'
+          #import <UIKit/UIKit.h>
+          #import <Security/Security.h>
+          #import <dlfcn.h>
+
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
+          static NSString* getActiveSlot() {
+              NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+              NSString *slot = prefs[@"activeSlot"];
+              return slot.length > 0 ? slot : @"Default";
+          }
+
+          static NSString* getSlotCachePath() {
+              NSString *slot = getActiveSlot();
+              return [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, slot];
+          }
+
+          // Hook UIDevice - IDFV 伪造
+          %hook UIDevice
+          - (NSUUID *)identifierForVendor {
+              NSString *slot = getActiveSlot();
+              NSString *slotPrefsPath = [NSString stringWithFormat:@"%@/%@.plist", getSlotCachePath(), slot];
+              NSDictionary *slotPrefs = [NSDictionary dictionaryWithContentsOfFile:slotPrefsPath];
+              
+              if (slotPrefs[@"fakeIDFV"]) {
+                  return [[NSUUID alloc] initWithUUIDString:slotPrefs[@"fakeIDFV"]];
+              }
+              return %orig;
+          }
+          
+          - (NSString *)name {
+              return @"iPhone";
+          }
+          %end
+
+          // Hook ASIdentifierManager - IDFA 伪造
+          %hook ASIdentifierManager
+          - (NSUUID *)advertisingIdentifier {
+              NSString *slot = getActiveSlot();
+              NSString *slotPrefsPath = [NSString stringWithFormat:@"%@/%@.plist", getSlotCachePath(), slot];
+              NSDictionary *slotPrefs = [NSDictionary dictionaryWithContentsOfFile:slotPrefsPath];
+              
+              if (slotPrefs[@"fakeIDFA"]) {
+                  return [[NSUUID alloc] initWithUUIDString:slotPrefs[@"fakeIDFA"]];
+              }
+              return %orig;
+          }
+          
+          - (BOOL)isAdvertisingTrackingEnabled {
+              return NO;
+          }
+          %end
+
+          // 路径重定向 - Hook open 函数
+          #include <fcntl.h>
+          #include <stdarg.h>
+          
+          static int (*orig_open)(const char *, int, ...);
+          
+          int fake_open(const char *path, int oflag, ...) {
+              NSString *nsPath = [NSString stringWithUTF8String:path];
+              NSString *activeSlot = getActiveSlot();
+              
+              NSArray *redirectPaths = @[
+                  @"/Library/Caches",
+                  @"/Library/WebKit",
+                  @"/Library/Cookies", 
+                  @"/Library/Safari",
+                  @"/Documents",
+                  @"Caches",
+                  @"com.apple.WebKit"
+              ];
+              
+              for (NSString *redirect in redirectPaths) {
+                  if ([nsPath containsString:redirect]) {
+                      NSString *slotDir = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, activeSlot];
+                      NSString *fileName = [nsPath lastPathComponent];
+                      NSString *newPath = [slotDir stringByAppendingPathComponent:fileName];
+                      
+                      [[NSFileManager defaultManager] createDirectoryAtPath:slotDir 
+                                                withIntermediateDirectories:YES 
+                                                                 attributes:nil 
+                                                                      error:nil];
+                      return orig_open([newPath UTF8String], oflag);
+                  }
+              }
+              
+              va_list args;
+              va_start(args, oflag);
+              mode_t mode = va_arg(args, mode_t);
+              va_end(args);
+              return orig_open(path, oflag, mode);
+          }
+
+          // Keychain 清理
+          %hookf(SecItemCopyMatching, OSStatus, CFDictionaryRef query, CFTypeRef *result) {
+              NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+              if ([prefs[@"needWipeKeychain"] boolValue]) {
+                  // 清理 Keychain
+                  NSArray *secClasses = @[
+                      (__bridge id)kSecClassGenericPassword,
+                      (__bridge id)kSecClassInternetPassword,
+                      (__bridge id)kSecClassCertificate,
+                      (__bridge id)kSecClassKey
+                  ];
+                  
+                  for (id secClass in secClasses) {
+                      NSDictionary *clearQuery = @{(__bridge id)kSecClass: secClass};
+                      SecItemDelete((__bridge CFDictionaryRef)clearQuery);
+                  }
+                  
+                  // 重置标记
+                  NSMutableDictionary *mutablePrefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
+                  mutablePrefs[@"needWipeKeychain"] = @NO;
+                  [mutablePrefs writeToFile:kPrefsPath atomically:YES];
+                  
+                  return errSecItemNotFound;
+              }
+              return %orig;
+          }
+
+          // 获取当前 IP 信息（用于 UI）
+          static NSString* currentIP = nil;
+          static NSString* currentLocation = nil;
+          
+          void fetchIPInfo() {
+              dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                  NSURL *url = [NSURL URLWithString:@"https://ipapi.co/json/"];
+                  NSURLRequest *request = [NSURLRequest requestWithURL:url timeoutInterval:5.0];
+                  
+                  NSURLSession *session = [NSURLSession sharedSession];
+                  NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                      if (!error && data) {
+                          NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                          if (json) {
+                              currentIP = json[@"ip"];
+                              currentLocation = [NSString stringWithFormat:@"%@, %@", json[@"country_name"] ?: @"Unknown", json[@"city"] ?: @""];
+                              
+                              // 保存到偏好
+                              NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
+                              if (!prefs) prefs = [NSMutableDictionary dictionary];
+                              prefs[@"lastIP"] = currentIP;
+                              prefs[@"lastLocation"] = currentLocation;
+                              [prefs writeToFile:kPrefsPath atomically:YES];
+                          }
+                      }
+                  }];
+                  [task resume];
+              });
+          }
+
+          // 初始化时创建必要目录
+          %ctor {
+              @autoreleasepool {
+                  NSString *processName = [[NSProcessInfo processInfo] processName];
+                  if ([processName isEqualToString:@"Vinted"] || [processName containsString:@"Vinted"]) {
+                      // 创建基础目录
+                      [[NSFileManager defaultManager] createDirectoryAtPath:kSlotsBasePath 
+                                                withIntermediateDirectories:YES 
+                                                                 attributes:nil 
+                                                                      error:nil];
+                      
+                      // 初始化默认 slot
+                      NSString *defaultSlot = [NSString stringWithFormat:@"%@/Default", kSlotsBasePath];
+                      if (![[NSFileManager defaultManager] fileExistsAtPath:defaultSlot]) {
+                          [[NSFileManager defaultManager] createDirectoryAtPath:defaultSlot 
+                                                    withIntermediateDirectories:YES 
+                                                                     attributes:nil 
+                                                                          error:nil];
+                          
+                          NSString *defaultPrefs = [NSString stringWithFormat:@"%@/Default.plist", defaultSlot];
+                          NSDictionary *newSlotPrefs = @{
+                              @"fakeIDFV": [[NSUUID UUID] UUIDString],
+                              @"fakeIDFA": [[NSUUID UUID] UUIDString],
+                              @"createdAt": [NSDate date]
+                          };
+                          [newSlotPrefs writeToFile:defaultPrefs atomically:YES];
+                      }
+                      
+                      // 获取 IP 信息
+                      fetchIPInfo();
+                      
+                      // Hook open
+                      MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
+                      
+                      %init;
+                  }
+              }
+          }
+          TWEAK_EOF
+
+          # 设置面板 Makefile
+          cat > vintedisoui/Makefile << 'UI_MAKEFILE'
+          include $(THEOS)/makefiles/common.mk
+          BUNDLE_NAME = VintedIsoUI
+          VintedIsoUI_FILES = RootListController.m
+          VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
+          VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation
+          VintedIsoUI_PRIVATE_FRAMEWORKS = Preferences
+          include $(THEOS)/makefiles/bundle.mk
+          UI_MAKEFILE
+
+          # 设置面板主文件
+          cat > vintedisoui/RootListController.m << 'UI_M_EOF'
+          #import <Preferences/PSListController.h>
+          #import <Preferences/PSSpecifier.h>
+          #import <spawn.h>
+          #include <sys/wait.h>
+
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
+          @interface VintedIsoRootListController : PSListController
+          @property (nonatomic, strong) NSString *currentIP;
+          @property (nonatomic, strong) NSString *currentLocation;
+          @end
+
+          @implementation VintedIsoRootListController
+
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              [self loadCurrentIPInfo];
+          }
+
+          - (void)loadCurrentIPInfo {
+              NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+              self.currentIP = prefs[@"lastIP"] ?: @"检测中...";
+              self.currentLocation = prefs[@"lastLocation"] ?: @"检测中...";
+              [self reloadSpecifiers];
+              
+              // 后台刷新
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                  [self refreshIPInfo];
+              });
+          }
+
+          - (void)refreshIPInfo {
+              NSURL *url = [NSURL URLWithString:@"https://ipapi.co/json/"];
+              NSURLRequest *request = [NSURLRequest requestWithURL:url timeoutInterval:5.0];
+              NSURLSession *session = [NSURLSession sharedSession];
+              
+              [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                  if (!error && data) {
+                      NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                          if (json[@"ip"]) self.currentIP = json[@"ip"];
+                          if (json[@"country_name"]) {
+                              self.currentLocation = [NSString stringWithFormat:@"%@ %@", json[@"country_name"], json[@"city"] ?: @""];
+                          }
+                          
+                          // 保存
+                          NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
+                          prefs[@"lastIP"] = self.currentIP;
+                          prefs[@"lastLocation"] = self.currentLocation;
+                          [prefs writeToFile:kPrefsPath atomically:YES];
+                          
+                          [self reloadSpecifiers];
+                      });
+                  }
+              }] resume];
+          }
+
+          - (NSArray *)specifiers {
+              if (!_specifiers) {
+                  NSMutableArray *specs = [NSMutableArray array];
+                  
+                  // IP 信息组
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🌐 网络环境信息"]];
+                  
+                  PSSpecifier *ipSpec = [PSSpecifier preferenceSpecifierWithName:@"IP 地址" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [ipSpec setProperty:self.currentIP ?: @"检测中..." forKey:@"staticText"];
+                  [specs addObject:ipSpec];
+                  
+                  PSSpecifier *locSpec = [PSSpecifier preferenceSpecifierWithName:@"地理位置" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [locSpec setProperty:self.currentLocation ?: @"检测中..." forKey:@"staticText"];
+                  [specs addObject:locSpec];
+                  
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🔧 分身管理"]];
+                  
+                  // 当前环境
+                  NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+                  NSString *activeSlot = prefs[@"activeSlot"] ?: @"Default";
+                  PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前环境" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [activeSpec setProperty:activeSlot forKey:@"staticText"];
+                  [specs addObject:activeSpec];
+                  
+                  // 新建按钮
+                  PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                  addBtn.buttonAction = @selector(createNewSlot);
+                  [specs addObject:addBtn];
+                  
+                  // 已有分身列表
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"📁 已有分身"]];
+                  
+                  NSArray *slots = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil];
+                  if (slots.count == 0) {
+                      PSSpecifier *emptySpec = [PSSpecifier preferenceSpecifierWithName:@"暂无，请点击上方新建" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                      [specs addObject:emptySpec];
+                  } else {
+                      for (NSString *slotName in slots) {
+                          if ([slotName hasPrefix:@"."]) continue;
+                          
+                          PSSpecifier *slotSpec = [PSSpecifier preferenceSpecifierWithName:slotName target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                          slotSpec.buttonAction = @selector(switchToSlot:);
+                          [slotSpec setProperty:slotName forKey:@"slotName"];
+                          [specs addObject:slotSpec];
+                      }
+                  }
+                  
+                  _specifiers = specs;
+              }
+              return _specifiers;
+          }
+
+          - (void)createNewSlot {
+              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"新建分身"
+                                                                             message:@"输入分身名称（支持中文/英文/数字）"
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+              [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+                  textField.placeholder = @"例：店铺A-英区";
+                  textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+              }];
+              
+              UIAlertAction *create = [UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                  NSString *name = alert.textFields.firstObject.text;
+                  if (name.length > 0) {
+                      [self performSelector:@selector(createSlotWithName:) withObject:name afterDelay:0.1];
+                  }
+              }];
+              
+              [alert addAction:create];
+              [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+              [self presentViewController:alert animated:YES completion:nil];
+          }
+
+          - (void)createSlotWithName:(NSString *)name {
+              NSString *slotPath = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
+              NSString *slotPrefsPath = [NSString stringWithFormat:@"%@/%@.plist", slotPath, name];
+              
+              if ([[NSFileManager defaultManager] fileExistsAtPath:slotPath]) {
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"分身已存在" preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                  [self presentViewController:alert animated:YES completion:nil];
+                  return;
+              }
+              
+              // 创建目录和配置
+              [[NSFileManager defaultManager] createDirectoryAtPath:slotPath withIntermediateDirectories:YES attributes:nil error:nil];
+              
+              NSDictionary *slotPrefs = @{
+                  @"fakeIDFV": [[NSUUID UUID] UUIDString],
+                  @"fakeIDFA": [[NSUUID UUID] UUIDString],
+                  @"createdAt": [NSDate date],
+                  @"name": name
+              };
+              [slotPrefs writeToFile:slotPrefsPath atomically:YES];
+              
+              // 自动切换到新分身
+              [self switchToSlotWithName:name];
+          }
+
+          - (void)switchToSlot:(PSSpecifier *)spec {
+              NSString *slotName = [spec propertyForKey:@"slotName"];
+              if (slotName) {
+                  [self switchToSlotWithName:slotName];
+              }
+          }
+
+          - (void)switchToSlotWithName:(NSString *)slotName {
+              // 更新全局配置
+              NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
+              prefs[@"activeSlot"] = slotName;
+              prefs[@"needWipeKeychain"] = @YES;
+              [prefs writeToFile:kPrefsPath atomically:YES];
+              
+              // 杀掉 Vinted
+              pid_t pid;
+              int status;
+              const char *args[] = {"killall", "-9", "Vinted", NULL};
+              posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
+              waitpid(pid, &status, 0);
+              
+              // 刷新 UI
+              _specifiers = nil;
+              [self reloadSpecifiers];
+              
+              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"切换成功"
+                                                                             message:[NSString stringWithFormat:@"已切换到「%@」\n请重新打开 Vinted", slotName]
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+              [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+              [self presentViewController:alert animated:YES completion:nil];
+          }
+
+          @end
+          UI_M_EOF
+
+          # 设置面板配置文件
+          cat > vintedisoui/Resources/Info.plist << 'INFO_PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>VintedIsoUI</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.vinted.isolator.ui</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>VintedIsoUI</string>
+              <key>CFBundlePackageType</key>
+              <string>BNDL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundleVersion</key>
+              <string>1.0.0</string>
+          </dict>
+          </plist>
+          INFO_PLIST
+
+      - name: 编译插件
+        run: |
+          export THEOS=$HOME/theos
+          export PATH=$THEOS/bin:$PATH
+          make clean
+          make package
+
+      - name: 上传 deb 包
+        uses: actions/upload-artifact@v4
+        with:
+          name: VintedIsolator.deb
+          path: packages/*.deb
+          compression-level: 0
+
+      - name: 上传编译日志（调试用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            *.log
+            **/*.log
+            packages/
+          if-no-files-found: ignore
