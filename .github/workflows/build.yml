@@ -1,108 +1,101 @@
-name: Vinted底层分身完整版
+name: Vinted底层分身完整版 (macOS原生编译)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装依赖和完整Theos
+      # ---------- 1. 缓存 Theos ----------
+      - name: 缓存 Theos
+        id: cache-theos
+        uses: actions/cache@v3
+        with:
+          path: ~/theos
+          key: theos-macos-v1
+
+      # ---------- 2. 缓存 iOS SDK ----------
+      - name: 缓存 iOS SDK
+        id: cache-sdk
+        uses: actions/cache@v3
+        with:
+          path: ~/sdks
+          key: sdk-macos-v1
+
+      # ---------- 3. 安装 Theos（仅缓存未命中时）----------
+      - name: 安装 Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
-          # 安装系统依赖
-          sudo apt-get update
-          sudo apt-get install -y git make curl unzip libxml2-utils
-          
-          # 安装 Perl 模块
-          sudo apt-get install -y libio-compress-perl
-          
-          # 克隆 Theos
           git clone --depth 1 https://github.com/theos/theos.git ~/theos
-          
-          # 关键修复：运行 update-theos 来获取 vendor 目录
-          cd ~/theos
-          export THEOS=~/theos
-          bash bin/update-theos
-          
-          # 下载 dm.pl
-          sudo mkdir -p /usr/local/bin
-          sudo curl -o /usr/local/bin/dm.pl https://raw.githubusercontent.com/theos/dm.pl/master/dm.pl
-          sudo chmod +x /usr/local/bin/dm.pl
-          
-          # 下载 iOS SDK
+          echo "THEOS=~/theos" >> $GITHUB_ENV
+          echo "~/theos/bin" >> $GITHUB_PATH
+
+      # ---------- 4. 安装 SDK（仅缓存未命中时）----------
+      - name: 安装 iOS SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
           git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git ~/sdks
           mkdir -p ~/theos/sdks
           cp -r ~/sdks/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || true
           cp -r ~/sdks/iPhoneOS15.0.sdk ~/theos/sdks/ 2>/dev/null || true
-          
-          # 设置环境变量
-          echo "THEOS=~/theos" >> $GITHUB_ENV
-          echo "~/theos/bin" >> $GITHUB_PATH
-          echo "/usr/local/bin" >> $GITHUB_PATH
 
-      - name: 验证 Theos 安装
-        run: |
-          export THEOS=~/theos
-          ls -la ~/theos/vendor/  # 确保 vendor 目录存在
-          echo "THEOS: $THEOS"
-          echo "PATH: $PATH"
-
+      # ---------- 5. 生成插件源码（无变化）----------
       - name: 生成插件源码
         run: |
           mkdir -p vintedisoui/Resources
           
-          # 创建 Makefile（简化版，确保兼容性）
           cat > Makefile << 'EOF'
-          export THEOS := $(shell echo ~/theos)
           TARGET := iphone:clang:latest:15.0
+          INSTALL_TARGET_PROCESSES = Vinted
           ARCHS = arm64 arm64e
           include $(THEOS)/makefiles/common.mk
           TWEAK_NAME = VintedIsolator
           VintedIsolator_FILES = Tweak.x
-          VintedIsolator_FRAMEWORKS = UIKit Security
+          VintedIsolator_FRAMEWORKS = UIKit Security Foundation SystemConfiguration
           include $(THEOS)/makefiles/tweak.mk
           SUBPROJECTS += vintedisoui
           include $(THEOS)/makefiles/aggregate.mk
           EOF
           
           cat > control << 'EOF'
-          Package: com.vinted.isolator
-          Name: Vinted分身隔离系统
-          Depends: mobilesubstrate, preferenceloader
+          Package: com.vinted.bottom.isolator
+          Name: Vinted底层分身隔离系统
+          Depends: mobilesubstrate (>= 0.9.5000), preferenceloader (>= 2.2)
           Version: 3.0.0
           Architecture: iphoneos-arm64
-          Description: 完整分身隔离插件
+          Description: 完整底层Hook分身隔离
           Section: Tweaks
           EOF
           
           cat > VintedIsolator.plist << 'EOF'
           {
             Filter = {
-              Bundles = ("fr.vinted.vinted");
+              Bundles = ("fr.vinted.vinted", "com.vinted.app");
             };
           }
           EOF
           
-          cat > Tweak.x << 'EOF'
+          cat > Tweak.x << 'TWEAK_END'
           #import <UIKit/UIKit.h>
           #import <Security/Security.h>
-          
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedSlots"
-          
+
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
+
           static NSString* getActiveSlot() {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               NSString *slot = prefs[@"activeSlot"];
               return slot.length > 0 ? slot : @"Default";
           }
-          
+
           static NSString* getSlotConfigPath() {
               NSString *slot = getActiveSlot();
               return [NSString stringWithFormat:@"%@/%@/config.plist", kSlotsBasePath, slot];
           }
-          
+
           %hook UIDevice
           - (NSUUID *)identifierForVendor {
               NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
@@ -120,7 +113,7 @@ jobs:
               return config[@"systemVersion"] ?: @"17.0";
           }
           %end
-          
+
           %hook ASIdentifierManager
           - (NSUUID *)advertisingIdentifier {
               NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
@@ -133,7 +126,7 @@ jobs:
               return NO;
           }
           %end
-          
+
           %hook NSLocale
           - (NSString *)objectForKey:(id)key {
               if ([key isEqualToString:NSLocaleCountryCode]) {
@@ -147,21 +140,21 @@ jobs:
               return %orig;
           }
           %end
-          
+
           #include <fcntl.h>
           #include <stdarg.h>
-          
+
           static int (*orig_open)(const char *path, int oflag, ...);
-          
+
           int fake_open(const char *path, int oflag, ...) {
               NSString *nsPath = [NSString stringWithUTF8String:path];
               NSString *slot = getActiveSlot();
-              
+
               NSArray *redirectPaths = @[
                   @"/Library/Caches", @"/Library/WebKit",
                   @"/Library/Cookies", @"/Documents"
               ];
-              
+
               for (NSString *rp in redirectPaths) {
                   if ([nsPath containsString:rp]) {
                       NSString *slotDir = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, slot];
@@ -177,14 +170,14 @@ jobs:
                       return orig_open([newPath UTF8String], oflag, mode);
                   }
               }
-              
+
               va_list args;
               va_start(args, oflag);
               mode_t mode = va_arg(args, mode_t);
               va_end(args);
               return orig_open(path, oflag, mode);
           }
-          
+
           %hookf(SecItemCopyMatching, OSStatus, CFDictionaryRef query, CFTypeRef *result) {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               if ([prefs[@"needWipeKeychain"] boolValue]) {
@@ -203,7 +196,7 @@ jobs:
               }
               return %orig;
           }
-          
+
           %ctor {
               @autoreleasepool {
                   NSString *name = [[NSProcessInfo processInfo] processName];
@@ -212,7 +205,7 @@ jobs:
                                                 withIntermediateDirectories:YES
                                                                  attributes:nil
                                                                       error:nil];
-                      
+
                       NSString *defaultSlot = [NSString stringWithFormat:@"%@/Default", kSlotsBasePath];
                       if (![[NSFileManager defaultManager] fileExistsAtPath:defaultSlot]) {
                           [[NSFileManager defaultManager] createDirectoryAtPath:defaultSlot
@@ -229,20 +222,21 @@ jobs:
                           };
                           [config writeToFile:[NSString stringWithFormat:@"%@/config.plist", defaultSlot] atomically:YES];
                       }
-                      
+
                       MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
                       %init;
                   }
               }
           }
-          EOF
+          TWEAK_END
           
           cat > vintedisoui/Makefile << 'EOF'
           include $(THEOS)/makefiles/common.mk
           BUNDLE_NAME = VintedIsoUI
           VintedIsoUI_FILES = RootListController.m
           VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
-          VintedIsoUI_FRAMEWORKS = UIKit
+          VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation
+          VintedIsoUI_PRIVATE_FRAMEWORKS = Preferences
           include $(THEOS)/makefiles/bundle.mk
           EOF
           
@@ -250,21 +244,23 @@ jobs:
           #import <Preferences/PSListController.h>
           #import <Preferences/PSSpecifier.h>
           #import <spawn.h>
-          
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedSlots"
-          
+          #include <sys/wait.h>
+
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
+
           @interface VintedRootListController : PSListController
           @property (nonatomic, strong) NSString *currentIP;
+          @property (nonatomic, strong) NSString *currentLocation;
           @end
-          
+
           @implementation VintedRootListController
-          
+
           - (void)viewDidLoad {
               [super viewDidLoad];
               [self fetchIPInfo];
           }
-          
+
           - (void)fetchIPInfo {
               NSURL *url = [NSURL URLWithString:@"https://ipapi.co/json/"];
               NSURLSession *session = [NSURLSession sharedSession];
@@ -273,32 +269,43 @@ jobs:
                       NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                       dispatch_async(dispatch_get_main_queue(), ^{
                           if (json[@"ip"]) self.currentIP = json[@"ip"];
+                          if (json[@"country_name"]) {
+                              self.currentLocation = [NSString stringWithFormat:@"%@ %@", json[@"country_name"], json[@"city"] ?: @""];
+                          }
+                          NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
+                          prefs[@"lastIP"] = self.currentIP;
+                          prefs[@"lastLocation"] = self.currentLocation;
+                          [prefs writeToFile:kPrefsPath atomically:YES];
                           [self reloadSpecifiers];
                       });
                   }
               }] resume];
           }
-          
+
           - (NSArray *)specifiers {
               if (!_specifiers) {
                   NSMutableArray *specs = [NSMutableArray array];
-                  
+
                   [specs addObject:[PSSpecifier groupSpecifierWithName:@"🌐 网络信息"]];
                   PSSpecifier *ipSpec = [PSSpecifier preferenceSpecifierWithName:@"当前IP" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
                   [ipSpec setProperty:self.currentIP ?: @"检测中..." forKey:@"staticText"];
                   [specs addObject:ipSpec];
                   
+                  PSSpecifier *locSpec = [PSSpecifier preferenceSpecifierWithName:@"地理位置" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [locSpec setProperty:self.currentLocation ?: @"检测中..." forKey:@"staticText"];
+                  [specs addObject:locSpec];
+
                   [specs addObject:[PSSpecifier groupSpecifierWithName:@"🔧 分身管理"]];
                   NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
                   NSString *active = prefs[@"activeSlot"] ?: @"Default";
                   PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前分身" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
                   [activeSpec setProperty:active forKey:@"staticText"];
                   [specs addObject:activeSpec];
-                  
+
                   PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
                   addBtn.buttonAction = @selector(createSlot);
                   [specs addObject:addBtn];
-                  
+
                   [specs addObject:[PSSpecifier groupSpecifierWithName:@"📁 分身列表"]];
                   NSArray *slots = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil];
                   for (NSString *slot in slots) {
@@ -308,12 +315,12 @@ jobs:
                       [slotSpec setProperty:slot forKey:@"slot"];
                       [specs addObject:slotSpec];
                   }
-                  
+
                   _specifiers = specs;
               }
               return _specifiers;
           }
-          
+
           - (void)createSlot {
               UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"新建分身" message:@"输入名称" preferredStyle:UIAlertControllerStyleAlert];
               [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
@@ -326,7 +333,7 @@ jobs:
               [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
               [self presentViewController:alert animated:YES completion:nil];
           }
-          
+
           - (void)createSlotWithName:(NSString *)name {
               NSString *path = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
               if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return;
@@ -340,22 +347,22 @@ jobs:
               [config writeToFile:[NSString stringWithFormat:@"%@/config.plist", path] atomically:YES];
               [self switchToSlotWithName:name];
           }
-          
+
           - (void)switchToSlot:(PSSpecifier *)spec {
               [self switchToSlotWithName:[spec propertyForKey:@"slot"]];
           }
-          
+
           - (void)switchToSlotWithName:(NSString *)name {
               NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
               prefs[@"activeSlot"] = name;
               prefs[@"needWipeKeychain"] = @YES;
               [prefs writeToFile:kPrefsPath atomically:YES];
-              
+
               const char *args[] = {"killall", "-9", "Vinted", NULL};
               pid_t pid;
               posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
               waitpid(pid, NULL, 0);
-              
+
               _specifiers = nil;
               [self reloadSpecifiers];
           }
@@ -365,27 +372,32 @@ jobs:
           cat > vintedisoui/Resources/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>VintedIsoUI</string>
-          <key>CFBundleIdentifier</key><string>com.vinted.isolator.ui</string>
-          <key>CFBundleName</key><string>Vinted隔离</string>
-          <key>CFBundleShortVersionString</key><string>3.0.0</string>
-          </dict></plist>
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>VintedIsoUI</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.vinted.bottom.isolator.ui</string>
+              <key>CFBundleName</key>
+              <string>Vinted隔离</string>
+              <key>CFBundleShortVersionString</key>
+              <string>3.0.0</string>
+          </dict>
+          </plist>
           EOF
           
           echo "✅ 源码生成完成"
 
+      # ---------- 6. 编译 ----------
       - name: 编译插件
         run: |
           export THEOS=~/theos
-          export PATH=$THEOS/bin:/usr/local/bin:$PATH
-          cd ~/theos
-          bash bin/update-theos  # 确保 vendor 目录完整
-          cd -
+          export PATH=$THEOS/bin:$PATH
           make package
 
+      # ---------- 7. 上传产物 ----------
       - name: 上传deb包
         uses: actions/upload-artifact@v4
         with:
-          name: VintedIsolator.deb
+          name: VintedBottomIsolator.deb
           path: packages/*.deb
