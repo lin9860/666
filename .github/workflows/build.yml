@@ -1,89 +1,103 @@
-name: Vinted底层分身完整版 (macOS原生编译)
+name: Vinted插件Linux编译(完整版)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # ---------- 1. 缓存 Theos ----------
-      - name: 缓存 Theos
-        id: cache-theos
-        uses: actions/cache@v3
-        with:
-          path: ~/theos
-          key: theos-macos-v1
-
-      # ---------- 2. 缓存 iOS SDK ----------
-      - name: 缓存 iOS SDK
-        id: cache-sdk
-        uses: actions/cache@v3
-        with:
-          path: ~/sdks
-          key: sdk-macos-v1
-
-      # ---------- 3. 安装 Theos（仅缓存未命中时）----------
-      - name: 安装 Theos
-        if: steps.cache-theos.outputs.cache-hit != 'true'
+      - name: 安装Linux编译依赖
         run: |
-          git clone --depth 1 https://github.com/theos/theos.git ~/theos
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make curl unzip \
+            build-essential fakeroot \
+            clang libclang-dev \
+            libxml2-dev libssl-dev \
+            libio-compress-perl
+
+      - name: 下载并安装iOS交叉编译工具链
+        run: |
+          # 下载 CoolStar 的 iOS 工具链 (Linux版)
+          wget https://github.com/coolstar/odyssey-toolchain/releases/download/v1.0/odyssey-toolchain-ubuntu-latest.tar.xz
+          sudo tar -xJf odyssey-toolchain-ubuntu-latest.tar.xz -C /opt/
+          echo "/opt/odyssey-toolchain/usr/bin" >> $GITHUB_PATH
+
+      - name: 安装Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
           echo "THEOS=~/theos" >> $GITHUB_ENV
           echo "~/theos/bin" >> $GITHUB_PATH
 
-      # ---------- 4. 安装 SDK（仅缓存未命中时）----------
-      - name: 安装 iOS SDK
-        if: steps.cache-sdk.outputs.cache-hit != 'true'
+      - name: 下载iOS SDK
         run: |
           git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git ~/sdks
           mkdir -p ~/theos/sdks
           cp -r ~/sdks/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || true
           cp -r ~/sdks/iPhoneOS15.0.sdk ~/theos/sdks/ 2>/dev/null || true
 
-      # ---------- 5. 生成插件源码（无变化）----------
+      - name: 配置Theos使用Linux工具链
+        run: |
+          cat >> ~/theos/makefiles/targets/Darwin/iphone.mk << 'EOF'
+          # Linux cross-compile toolchain
+          ifeq ($(shell uname),Linux)
+            TARGET_CC = /opt/odyssey-toolchain/usr/bin/clang
+            TARGET_CXX = /opt/odyssey-toolchain/usr/bin/clang++
+            TARGET_STRIP = /opt/odyssey-toolchain/usr/bin/strip
+            TARGET_CODESIGN = /opt/odyssey-toolchain/usr/bin/ldid
+          endif
+          EOF
+
+      - name: 修复dm.pl打包问题
+        run: |
+          # 修改压缩方式从lzma改为gzip (gzip在Linux上更稳定)
+          sed -i 's/lzma/gzip/g' ~/theos/makefiles/package/deb.mk
+
       - name: 生成插件源码
         run: |
           mkdir -p vintedisoui/Resources
-          
-          cat > Makefile << 'EOF'
+
+          cat > Makefile << 'MAKEFILE_END'
           TARGET := iphone:clang:latest:15.0
           INSTALL_TARGET_PROCESSES = Vinted
           ARCHS = arm64 arm64e
+          GO_EASY_ON_ME = 1
           include $(THEOS)/makefiles/common.mk
           TWEAK_NAME = VintedIsolator
           VintedIsolator_FILES = Tweak.x
-          VintedIsolator_FRAMEWORKS = UIKit Security Foundation SystemConfiguration
+          VintedIsolator_FRAMEWORKS = UIKit Security Foundation
           include $(THEOS)/makefiles/tweak.mk
           SUBPROJECTS += vintedisoui
           include $(THEOS)/makefiles/aggregate.mk
-          EOF
-          
-          cat > control << 'EOF'
-          Package: com.vinted.bottom.isolator
-          Name: Vinted底层分身隔离系统
-          Depends: mobilesubstrate (>= 0.9.5000), preferenceloader (>= 2.2)
+          MAKEFILE_END
+
+          cat > control << 'CONTROL_END'
+          Package: com.vinted.linux.isolator
+          Name: Vinted分身隔离系统
+          Depends: mobilesubstrate, preferenceloader
           Version: 3.0.0
           Architecture: iphoneos-arm64
-          Description: 完整底层Hook分身隔离
+          Description: Linux交叉编译版分身隔离插件
           Section: Tweaks
-          EOF
-          
-          cat > VintedIsolator.plist << 'EOF'
+          CONTROL_END
+
+          cat > VintedIsolator.plist << 'PLIST_END'
           {
             Filter = {
-              Bundles = ("fr.vinted.vinted", "com.vinted.app");
+              Bundles = ("fr.vinted.vinted");
             };
           }
-          EOF
-          
+          PLIST_END
+
           cat > Tweak.x << 'TWEAK_END'
           #import <UIKit/UIKit.h>
           #import <Security/Security.h>
 
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.linux.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedLinuxSlots"
 
           static NSString* getActiveSlot() {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
@@ -229,8 +243,8 @@ jobs:
               }
           }
           TWEAK_END
-          
-          cat > vintedisoui/Makefile << 'EOF'
+
+          cat > vintedisoui/Makefile << 'UI_MAKEFILE'
           include $(THEOS)/makefiles/common.mk
           BUNDLE_NAME = VintedIsoUI
           VintedIsoUI_FILES = RootListController.m
@@ -238,16 +252,16 @@ jobs:
           VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation
           VintedIsoUI_PRIVATE_FRAMEWORKS = Preferences
           include $(THEOS)/makefiles/bundle.mk
-          EOF
-          
-          cat > vintedisoui/RootListController.m << 'EOF'
+          UI_MAKEFILE
+
+          cat > vintedisoui/RootListController.m << 'UI_M_END'
           #import <Preferences/PSListController.h>
           #import <Preferences/PSSpecifier.h>
           #import <spawn.h>
           #include <sys/wait.h>
 
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.linux.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedLinuxSlots"
 
           @interface VintedRootListController : PSListController
           @property (nonatomic, strong) NSString *currentIP;
@@ -367,9 +381,9 @@ jobs:
               [self reloadSpecifiers];
           }
           @end
-          EOF
-          
-          cat > vintedisoui/Resources/Info.plist << 'EOF'
+          UI_M_END
+
+          cat > vintedisoui/Resources/Info.plist << 'INFO_END'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -377,27 +391,25 @@ jobs:
               <key>CFBundleExecutable</key>
               <string>VintedIsoUI</string>
               <key>CFBundleIdentifier</key>
-              <string>com.vinted.bottom.isolator.ui</string>
+              <string>com.vinted.linux.isolator.ui</string>
               <key>CFBundleName</key>
               <string>Vinted隔离</string>
               <key>CFBundleShortVersionString</key>
               <string>3.0.0</string>
           </dict>
           </plist>
-          EOF
-          
+          INFO_END
+
           echo "✅ 源码生成完成"
 
-      # ---------- 6. 编译 ----------
       - name: 编译插件
         run: |
           export THEOS=~/theos
-          export PATH=$THEOS/bin:$PATH
+          export PATH=/opt/odyssey-toolchain/usr/bin:$THEOS/bin:$PATH
           make package
 
-      # ---------- 7. 上传产物 ----------
       - name: 上传deb包
         uses: actions/upload-artifact@v4
         with:
-          name: VintedBottomIsolator.deb
+          name: VintedLinuxIsolator.deb
           path: packages/*.deb
