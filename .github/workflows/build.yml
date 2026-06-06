@@ -1,215 +1,235 @@
-name: Vinted插件Linux编译(最终稳定版)
+# .github/workflows/build.yml
+name: Build Vinted Advanced Plugin
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git make curl unzip \
-            build-essential \
-            libssl-dev \
-            python3
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-${{ runner.os }}-v1
 
-      - name: 安装 Theos
+      - name: Cache SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/sdks
+          key: sdk-${{ runner.os }}-v1
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: git clone --depth 1 https://github.com/theos/theos.git ~/theos
+
+      - name: Install SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/theos/theos.git ~/theos
+          git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git ~/sdks
+          mkdir -p ~/theos/sdks
+          cp -r ~/sdks/iPhoneOS16.5.sdk ~/theos/sdks/
+
+      - name: Set Environment
+        run: |
           echo "THEOS=~/theos" >> $GITHUB_ENV
           echo "~/theos/bin" >> $GITHUB_PATH
 
-      - name: 下载 iOS SDK (使用 Theos 官方源)
-        run: |
-          mkdir -p ~/theos/sdks
-          cd ~/theos/sdks
-          # 使用 GitHub 上确认存在的 SDK
-          wget -O iPhoneOS13.5.sdk.zip "https://github.com/theos/sdks/raw/master/iPhoneOS13.5.sdk.zip"
-          unzip -q iPhoneOS13.5.sdk.zip
-          rm iPhoneOS13.5.sdk.zip
-          ls -la
-
-      - name: 创建 iOS 交叉编译包装脚本
-        run: |
-          mkdir -p ~/ios-toolchain/bin
-          
-          # 查找 SDK 路径
-          SDK_PATH=$(ls -d ~/theos/sdks/iPhoneOS*.sdk | head -n 1)
-          echo "使用 SDK: $SDK_PATH"
-          
-          # 创建 clang 包装脚本
-          cat > ~/ios-toolchain/bin/ios-clang << 'EOF'
-          #!/bin/bash
-          SDK_PATH=$(ls -d ~/theos/sdks/iPhoneOS*.sdk | head -n 1)
-          exec clang -target arm64-apple-ios13.0 -isysroot "$SDK_PATH" -miphoneos-version-min=13.0 "$@"
-          EOF
-          
-          cat > ~/ios-toolchain/bin/ios-clang++ << 'EOF'
-          #!/bin/bash
-          SDK_PATH=$(ls -d ~/theos/sdks/iPhoneOS*.sdk | head -n 1)
-          exec clang++ -target arm64-apple-ios13.0 -isysroot "$SDK_PATH" -miphoneos-version-min=13.0 "$@"
-          EOF
-          
-          chmod +x ~/ios-toolchain/bin/ios-clang
-          chmod +x ~/ios-toolchain/bin/ios-clang++
-          
-          echo "$HOME/ios-toolchain/bin" >> $GITHUB_PATH
-
-      - name: 配置 Theos
-        run: |
-          cat > ~/theos/makefiles/targets/Darwin/iphone_Linux.mk << 'EOF'
-          ifeq ($(shell uname),Linux)
-          override CC := $(HOME)/ios-toolchain/bin/ios-clang
-          override CXX := $(HOME)/ios-toolchain/bin/ios-clang++
-          TARGET_CC := $(HOME)/ios-toolchain/bin/ios-clang
-          TARGET_CXX := $(HOME)/ios-toolchain/bin/ios-clang++
-          TARGET_STRIP := $(HOME)/ios-toolchain/bin/ios-clang
-          TARGET_CODESIGN := $(HOME)/ios-toolchain/bin/ios-clang
-          endif
-          EOF
-
-      - name: 生成插件源码
+      - name: Build Plugin
         run: |
           mkdir -p vintedisoui/Resources
+          mkdir -p layout/Library/PreferenceBundles/VintedIsolatorUI.bundle
+          mkdir -p layout/usr/lib
 
-          cat > Makefile << 'EOF'
-          TARGET := iphone:clang:13.0:13.0
+          # ========== Makefile ==========
+          cat > Makefile << 'MAKEFILE_EOF'
+          TARGET := iphone:clang:latest:15.0
           INSTALL_TARGET_PROCESSES = Vinted
           ARCHS = arm64
           GO_EASY_ON_ME = 1
           include $(THEOS)/makefiles/common.mk
           TWEAK_NAME = VintedIsolator
-          VintedIsolator_FILES = Tweak.x
-          VintedIsolator_FRAMEWORKS = UIKit Security Foundation
-          VintedIsolator_CFLAGS = -fobjc-arc
+          VintedIsolator_FILES = Tweak.x CanvasInjector.m FontInjector.m WebGLInjector.m
+          VintedIsolator_FRAMEWORKS = UIKit Security Foundation WebKit JavaScriptCore
+          VintedIsolator_CFLAGS = -fobjc-arc -Wall
           include $(THEOS)/makefiles/tweak.mk
           SUBPROJECTS += vintedisoui
           include $(THEOS)/makefiles/aggregate.mk
-          EOF
+          MAKEFILE_EOF
 
-          cat > control << 'EOF'
-          Package: com.vinted.isolator
-          Name: Vinted分身隔离系统
+          # ========== Control ==========
+          cat > control << 'CONTROL_EOF'
+          Package: com.vinted.advanced.isolator
+          Name: Vinted高级分身隔离系统
           Depends: mobilesubstrate, preferenceloader
-          Version: 3.0.0
+          Version: 4.0.0
           Architecture: iphoneos-arm64
-          Description: 完整分身隔离插件
+          Description: 高级指纹干扰 + 无限分身 + 环境隔离
           Section: Tweaks
-          EOF
+          CONTROL_EOF
 
-          cat > VintedIsolator.plist << 'EOF'
+          # ========== Filter ==========
+          cat > VintedIsolator.plist << 'PLIST_EOF'
           {
             Filter = {
-              Bundles = ("fr.vinted.vinted");
+              Bundles = ("fr.vinted.vinted", "com.vinted.app");
             };
           }
-          EOF
+          PLIST_EOF
 
+          # ========== Tweak.x ==========
           cat > Tweak.x << 'TWEAK_EOF'
           #import <UIKit/UIKit.h>
           #import <Security/Security.h>
+          #import <WebKit/WebKit.h>
 
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.advanced.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedAdvancedSlots"
+
+          // 外部函数声明
+          extern void initCanvasInjector(void);
+          extern void initFontInjector(void);
+          extern void initWebGLInjector(void);
+          extern void setCurrentSlot(NSString *slot);
+          extern NSString* getCurrentSlot(void);
 
           static NSString* getActiveSlot() {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               NSString *slot = prefs[@"activeSlot"];
-              return slot.length > 0 ? slot : @"Default";
+              if (!slot.length) slot = @"Default";
+              setCurrentSlot(slot);
+              return slot;
           }
 
-          static NSString* getSlotPath() {
-              return [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, getActiveSlot()];
+          static NSString* getSlotConfigPath() {
+              return [NSString stringWithFormat:@"%@/%@/config.plist", kSlotsBasePath, getActiveSlot()];
           }
 
+          // ===== 设备信息 Hook =====
           %hook UIDevice
           - (NSUUID *)identifierForVendor {
-              NSString *path = [NSString stringWithFormat:@"%@/idfv.txt", getSlotPath()];
-              NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-              if (fake && fake.length > 0) {
-                  return [[NSUUID alloc] initWithUUIDString:fake];
-              }
-              return %orig;
+              NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+              return c[@"fakeIDFV"] ? [[NSUUID alloc] initWithUUIDString:c[@"fakeIDFV"]] : %orig;
+          }
+          - (NSString *)name {
+              NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+              return c[@"deviceName"] ?: @"iPhone";
+          }
+          - (NSString *)systemVersion {
+              NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+              return c[@"systemVersion"] ?: @"17.0";
           }
           %end
 
           %hook ASIdentifierManager
           - (NSUUID *)advertisingIdentifier {
-              NSString *path = [NSString stringWithFormat:@"%@/idfa.txt", getSlotPath()];
-              NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-              if (fake && fake.length > 0) {
-                  return [[NSUUID alloc] initWithUUIDString:fake];
+              NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+              return c[@"fakeIDFA"] ? [[NSUUID alloc] initWithUUIDString:c[@"fakeIDFA"]] : %orig;
+          }
+          - (BOOL)isAdvertisingTrackingEnabled { return NO; }
+          %end
+
+          // ===== NSLocale Hook（语言地区）=====
+          %hook NSLocale
+          - (NSString *)objectForKey:(id)key {
+              if ([key isEqualToString:NSLocaleCountryCode]) {
+                  NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+                  return c[@"countryCode"] ?: %orig;
+              }
+              if ([key isEqualToString:NSLocaleLanguageCode]) {
+                  NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+                  return c[@"languageCode"] ?: %orig;
               }
               return %orig;
           }
-          - (BOOL)isAdvertisingTrackingEnabled {
-              return NO;
+          %end
+
+          // ===== UIScreen Hook =====
+          %hook UIScreen
+          - (CGSize)currentMode {
+              NSDictionary *c = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
+              if (c[@"width"] && c[@"height"]) {
+                  return CGSizeMake([c[@"width"] floatValue], [c[@"height"] floatValue]);
+              }
+              return %orig;
           }
           %end
 
-          #include <fcntl.h>
-          #include <stdarg.h>
-
-          static int (*orig_open)(const char *path, int oflag, ...);
-
-          int fake_open(const char *path, int oflag, ...) {
-              NSString *nsPath = [NSString stringWithUTF8String:path];
+          // ===== WebView 注入反指纹脚本 =====
+          %hook WKWebView
+          - (void)loadRequest:(NSURLRequest *)request {
+              %orig;
+              
+              // 注入反指纹 JS 脚本
               NSString *slot = getActiveSlot();
+              NSString *scriptPath = [NSString stringWithFormat:@"%@/%@/inject.js", kSlotsBasePath, slot];
+              NSString *js = [NSString stringWithContentsOfFile:scriptPath encoding:NSUTF8StringEncoding error:nil];
               
-              NSArray *redirectPaths = @[
-                  @"/Library/Caches",
-                  @"/Library/WebKit", 
-                  @"/Library/Cookies",
-                  @"/Documents"
-              ];
-              
-              for (NSString *rp in redirectPaths) {
-                  if ([nsPath containsString:rp]) {
-                      NSString *slotDir = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, slot];
-                      NSString *newPath = [slotDir stringByAppendingPathComponent:[nsPath lastPathComponent]];
-                      [[NSFileManager defaultManager] createDirectoryAtPath:slotDir
-                                                withIntermediateDirectories:YES
-                                                                 attributes:nil
-                                                                      error:nil];
-                      va_list args;
-                      va_start(args, oflag);
-                      mode_t mode = va_arg(args, mode_t);
-                      va_end(args);
-                      return orig_open([newPath UTF8String], oflag, mode);
-                  }
+              if (!js) {
+                  // 默认反指纹脚本
+                  js = @"(function() {"
+                       "  // 伪造 Canvas 指纹"
+                       "  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;"
+                       "  HTMLCanvasElement.prototype.toDataURL = function() {"
+                       "    const ctx = this.getContext('2d');"
+                       "    const imgData = ctx.getImageData(0, 0, this.width, this.height);"
+                       "    for (let i = 0; i < imgData.data.length; i += 4) {"
+                       "      if (Math.random() < 0.05) {"
+                       "        imgData.data[i] += Math.floor(Math.random() * 5) - 2;"
+                       "      }"
+                       "    }"
+                       "    ctx.putImageData(imgData, 0, 0);"
+                       "    return origToDataURL.apply(this, arguments);"
+                       "  };"
+                       "  // 伪造字体"
+                       "  const origQuery = navigator.fonts ? navigator.fonts.query : null;"
+                       "  if (origQuery) {"
+                       "    navigator.fonts.query = function() {"
+                       "      return Promise.resolve(["
+                       "        { family: 'FakeFont-Slot-" + slot + "' },"
+                       "        { family: 'Arial' }"
+                       "      ]);"
+                       "    };"
+                       "  }"
+                       "  // 伪造 WebGL"
+                       "  const getParameter = WebGLRenderingContext.prototype.getParameter;"
+                       "  WebGLRenderingContext.prototype.getParameter = function(param) {"
+                       "    if (param === 37445) return 'Fake GPU';"
+                       "    if (param === 37446) return 'Fake Renderer';"
+                       "    return getParameter.call(this, param);"
+                       "  };"
+                       "})();";
               }
               
-              va_list args;
-              va_start(args, oflag);
-              mode_t mode = va_arg(args, mode_t);
-              va_end(args);
-              return orig_open(path, oflag, mode);
+              WKUserScript *script = [[WKUserScript alloc] initWithSource:js
+                                                           injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                        forMainFrameOnly:YES];
+              [self.configuration.userContentController addUserScript:script];
           }
+          %end
 
+          // ===== Keychain 清理 =====
           %hookf(SecItemCopyMatching, OSStatus, CFDictionaryRef query, CFTypeRef *result) {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               if ([prefs[@"needWipeKeychain"] boolValue]) {
-                  NSArray *classes = @[
-                      (__bridge id)kSecClassGenericPassword,
-                      (__bridge id)kSecClassInternetPassword
-                  ];
+                  NSArray *classes = @[(__bridge id)kSecClassGenericPassword, (__bridge id)kSecClassInternetPassword];
                   for (id cls in classes) {
-                      NSDictionary *clearQuery = @{(__bridge id)kSecClass: cls};
-                      SecItemDelete((__bridge CFDictionaryRef)clearQuery);
+                      SecItemDelete((__bridge CFDictionaryRef)@{ (__bridge id)kSecClass: cls });
                   }
-                  NSMutableDictionary *mutablePrefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
-                  mutablePrefs[@"needWipeKeychain"] = @NO;
-                  [mutablePrefs writeToFile:kPrefsPath atomically:YES];
+                  NSMutableDictionary *p = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
+                  p[@"needWipeKeychain"] = @NO;
+                  [p writeToFile:kPrefsPath atomically:YES];
                   return errSecItemNotFound;
               }
               return %orig;
           }
 
+          // ===== 初始化 =====
           %ctor {
               @autoreleasepool {
                   NSString *name = [[NSProcessInfo processInfo] processName];
@@ -225,91 +245,332 @@ jobs:
                                                     withIntermediateDirectories:YES
                                                                      attributes:nil
                                                                           error:nil];
-                          [@"00000000-0000-0000-0000-000000000001" writeToFile:[NSString stringWithFormat:@"%@/idfv.txt", defaultSlot]
-                                                                    atomically:YES
-                                                                      encoding:NSUTF8StringEncoding
-                                                                         error:nil];
-                          [@"00000000-0000-0000-0000-000000000002" writeToFile:[NSString stringWithFormat:@"%@/idfa.txt", defaultSlot]
-                                                                    atomically:YES
-                                                                      encoding:NSUTF8StringEncoding
-                                                                         error:nil];
+                          
+                          NSDictionary *config = @{
+                              @"fakeIDFV": [[NSUUID UUID] UUIDString],
+                              @"fakeIDFA": [[NSUUID UUID] UUIDString],
+                              @"deviceName": @"iPhone 15 Pro",
+                              @"systemVersion": @"17.0",
+                              @"countryCode": @"US",
+                              @"languageCode": @"en",
+                              @"width": @1179,
+                              @"height": @2556
+                          };
+                          [config writeToFile:[defaultSlot stringByAppendingPathComponent:@"config.plist"] atomically:YES];
+                          
+                          // 创建反指纹 JS
+                          NSString *js = @"(function(){"
+                                          "const orig=HTMLCanvasElement.prototype.toDataURL;"
+                                          "HTMLCanvasElement.prototype.toDataURL=function(){"
+                                          "  const ctx=this.getContext('2d');"
+                                          "  const d=ctx.getImageData(0,0,this.width,this.height);"
+                                          "  for(let i=0;i<d.data.length;i+=4){"
+                                          "    if(Math.random()<0.03)d.data[i]+=Math.floor(Math.random()*5)-2;"
+                                          "  }"
+                                          "  ctx.putImageData(d,0,0);"
+                                          "  return orig.apply(this,arguments);"
+                                          "};"
+                                          "const gp=WebGLRenderingContext.prototype.getParameter;"
+                                          "WebGLRenderingContext.prototype.getParameter=function(p){"
+                                          "  if(p===37445)return 'Apple GPU';"
+                                          "  if(p===37446)return 'Apple M2';"
+                                          "  return gp.call(this,p);"
+                                          "};"
+                                          "})();";
+                          [js writeToFile:[defaultSlot stringByAppendingPathComponent:@"inject.js"]
+                               atomically:YES
+                                 encoding:NSUTF8StringEncoding
+                                    error:nil];
                       }
                       
-                      MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
+                      // 初始化指纹干扰模块
+                      initCanvasInjector();
+                      initFontInjector();
+                      initWebGLInjector();
+                      
+                      getActiveSlot();
                       %init;
                   }
               }
           }
           TWEAK_EOF
 
-          cat > vintedisoui/Makefile << 'EOF'
-          include $(THEOS)/makefiles/common.mk
-          BUNDLE_NAME = VintedIsoUI
-          VintedIsoUI_FILES = RootListController.m
-          VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
-          VintedIsoUI_FRAMEWORKS = UIKit
-          include $(THEOS)/makefiles/bundle.mk
-          EOF
+          # ========== CanvasInjector.m ==========
+          cat > CanvasInjector.m << 'CANVAS_EOF'
+          #import <UIKit/UIKit.h>
+          #import <substrate.h>
+          #import <objc/runtime.h>
 
-          cat > vintedisoui/RootListController.m << 'EOF'
+          extern NSString* getCurrentSlot(void);
+
+          static void (*orig_ImageData_init)(id self, SEL _cmd, void *data, NSUInteger width, NSUInteger height);
+          
+          void fake_ImageData_init(id self, SEL _cmd, void *data, NSUInteger width, NSUInteger height) {
+              orig_ImageData_init(self, _cmd, data, width, height);
+              
+              // 注入像素噪声
+              uint8_t *pixels = (uint8_t *)data;
+              NSUInteger pixelCount = width * height;
+              NSString *slot = getCurrentSlot();
+              
+              // 使用 slot 作为随机种子，确保每个分身的噪声模式一致
+              srand([slot hash]);
+              
+              for (NSUInteger i = 0; i < pixelCount * 4; i += 4) {
+                  if (rand() % 100 < 5) {
+                      pixels[i] += (rand() % 5) - 2;     // R
+                      pixels[i+1] += (rand() % 5) - 2;   // G
+                      pixels[i+2] += (rand() % 5) - 2;   // B
+                  }
+              }
+          }
+
+          void initCanvasInjector(void) {
+              Method m = class_getInstanceMethod(NSClassFromString(@"ImageData"), @selector(initWithData:width:height:));
+              if (m) {
+                  orig_ImageData_init = (void *)method_getImplementation(m);
+                  method_setImplementation(m, (IMP)fake_ImageData_init);
+              }
+              NSLog(@"[Vinted] Canvas injector initialized");
+          }
+          CANVAS_EOF
+
+          # ========== FontInjector.m ==========
+          cat > FontInjector.m << 'FONT_EOF'
+          #import <UIKit/UIKit.h>
+          #import <substrate.h>
+
+          extern NSString* getCurrentSlot(void);
+
+          static NSArray* (*orig_UIFontDescriptor_fontDescriptorsWithMandatoryKeys)(id self, SEL _cmd, NSArray *keys);
+          
+          NSArray* fake_UIFontDescriptor_fontDescriptorsWithMandatoryKeys(id self, SEL _cmd, NSArray *keys) {
+              NSArray *original = orig_UIFontDescriptor_fontDescriptorsWithMandatoryKeys(self, _cmd, keys);
+              NSMutableArray *result = [original mutableCopy];
+              
+              NSString *slot = getCurrentSlot();
+              NSString *cachePath = [NSString stringWithFormat:@"/var/mobile/VintedAdvancedSlots/%@/fonts.plist", slot];
+              NSArray *cached = [NSArray arrayWithContentsOfFile:cachePath];
+              
+              if (cached) {
+                  [result addObjectsFromArray:cached];
+              } else {
+                  // 生成随机字体描述符
+                  for (int i = 0; i < 3; i++) {
+                      NSString *fontName = [NSString stringWithFormat:@"FakeFont_%@_%d", slot, i];
+                      UIFontDescriptor *desc = [UIFontDescriptor fontDescriptorWithName:fontName size:14];
+                      [result addObject:desc];
+                  }
+                  [result writeToFile:cachePath atomically:YES];
+              }
+              
+              return result;
+          }
+
+          void initFontInjector(void) {
+              Class cls = NSClassFromString(@"UIFontDescriptor");
+              if (cls) {
+                  orig_UIFontDescriptor_fontDescriptorsWithMandatoryKeys = (void *)method_getImplementation(
+                      class_getClassMethod(cls, @selector(fontDescriptorsWithMandatoryKeys:))
+                  );
+                  method_setImplementation(
+                      class_getClassMethod(cls, @selector(fontDescriptorsWithMandatoryKeys:)),
+                      (IMP)fake_UIFontDescriptor_fontDescriptorsWithMandatoryKeys
+                  );
+              }
+              NSLog(@"[Vinted] Font injector initialized");
+          }
+          FONT_EOF
+
+          # ========== WebGLInjector.m ==========
+          cat > WebGLInjector.m << 'WEBGL_EOF'
+          #import <UIKit/UIKit.h>
+          #import <WebKit/WebKit.h>
+          #import <substrate.h>
+          #import <objc/runtime.h>
+
+          extern NSString* getCurrentSlot(void);
+
+          static id (*orig_WKWebView_config)(id self, SEL _cmd);
+          
+          id fake_WKWebView_config(id self, SEL _cmd) {
+              id config = orig_WKWebView_config(self, _cmd);
+              
+              NSString *slot = getCurrentSlot();
+              
+              // 注入 WebGL 反指纹脚本
+              NSString *js = [NSString stringWithFormat:
+                  @"(function() {"
+                   "  const origGetParameter = WebGLRenderingContext.prototype.getParameter;"
+                   "  WebGLRenderingContext.prototype.getParameter = function(param) {"
+                   "    if (param === 37445) return 'Apple %@ GPU';"
+                   "    if (param === 37446) return 'Apple M%@';"
+                   "    if (param === 7936) return 'WebGL 1.0';"
+                   "    return origGetParameter.call(this, param);"
+                   "  };"
+                   "  const origReadPixels = WebGLRenderingContext.prototype.readPixels;"
+                   "  WebGLRendering.prototype.readPixels = function(x, y, width, height, format, type, pixels) {"
+                   "    origReadPixels.call(this, x, y, width, height, format, type, pixels);"
+                   "    const view = new Uint8Array(pixels);"
+                   "    for (let i = 0; i < view.length; i += 4) {"
+                   "      if (Math.random() < 0.02) {"
+                   "        view[i] += Math.floor(Math.random() * 5) - 2;"
+                   "      }"
+                   "    }"
+                   "  };"
+                   "})();", slot, slot];
+              
+              WKUserScript *script = [[WKUserScript alloc] initWithSource:js
+                                                           injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                        forMainFrameOnly:YES];
+              [[config userContentController] addUserScript:script];
+              
+              return config;
+          }
+
+          void initWebGLInjector(void) {
+              Class cls = NSClassFromString(@"WKWebView");
+              if (cls) {
+                  orig_WKWebView_config = (void *)method_getImplementation(class_getInstanceMethod(cls, @selector(configuration)));
+                  method_setImplementation(class_getInstanceMethod(cls, @selector(configuration)), (IMP)fake_WKWebView_config);
+              }
+              NSLog(@"[Vinted] WebGL injector initialized");
+          }
+          WEBGL_EOF
+
+          # ========== UI Makefile ==========
+          cat > vintedisoui/Makefile << 'UI_MAKEFILE'
+          include $(THEOS)/makefiles/common.mk
+          BUNDLE_NAME = VintedIsolatorUI
+          VintedIsolatorUI_FILES = RootListController.m
+          VintedIsolatorUI_INSTALL_PATH = /Library/PreferenceBundles
+          VintedIsolatorUI_FRAMEWORKS = UIKit
+          include $(THEOS)/makefiles/bundle.mk
+          UI_MAKEFILE
+
+          # ========== UI RootListController ==========
+          cat > vintedisoui/RootListController.m << 'UI_EOF'
           #import <Preferences/PSListController.h>
+          #import <Preferences/PSSpecifier.h>
           #import <spawn.h>
 
-          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.advanced.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedAdvancedSlots"
 
-          @interface VintedRootListController : PSListController
+          @interface VintedRootController : PSListController
+          @property (nonatomic, strong) NSString *currentIP;
           @end
 
-          @implementation VintedRootListController
+          @implementation VintedRootController
+
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              [self fetchIPInfo];
+          }
+
+          - (void)fetchIPInfo {
+              NSURL *url = [NSURL URLWithString:@"https://ipapi.co/json/"];
+              [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                  if (!e && d) {
+                      NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                          if (j[@"ip"]) {
+                              self.currentIP = j[@"ip"];
+                              [self reloadSpecifiers];
+                          }
+                      });
+                  }
+              }] resume];
+          }
 
           - (NSArray *)specifiers {
               if (!_specifiers) {
-                  NSMutableArray *specs = [NSMutableArray array];
+                  NSMutableArray *s = [NSMutableArray array];
                   
-                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"分身管理"]];
-                  NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-                  NSString *active = prefs[@"activeSlot"] ?: @"Default";
-                  PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前分身" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
-                  [activeSpec setProperty:active forKey:@"staticText"];
-                  [specs addObject:activeSpec];
-
-                  PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-                  addBtn.buttonAction = @selector(createSlot);
-                  [specs addObject:addBtn];
-
-                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"分身列表"]];
+                  // IP 信息
+                  [s addObject:[PSSpecifier groupSpecifierWithName:@"🌐 网络信息"]];
+                  PSSpecifier *ip = [PSSpecifier preferenceSpecifierWithName:@"当前IP" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [ip setProperty:self.currentIP ?: @"检测中..." forKey:@"staticText"];
+                  [s addObject:ip];
+                  
+                  // 分身管理
+                  [s addObject:[PSSpecifier groupSpecifierWithName:@"🔧 高级分身管理"]];
+                  NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+                  NSString *active = p[@"activeSlot"] ?: @"Default";
+                  PSSpecifier *activeSp = [PSSpecifier preferenceSpecifierWithName:@"当前分身" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [activeSp setProperty:active forKey:@"staticText"];
+                  [s addObject:activeSp];
+                  
+                  PSSpecifier *add = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                  add.buttonAction = @selector(createSlot);
+                  [s addObject:add];
+                  
+                  // 分身列表
+                  [s addObject:[PSSpecifier groupSpecifierWithName:@"📁 分身列表"]];
                   NSArray *slots = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil];
                   for (NSString *slot in slots) {
                       if ([slot hasPrefix:@"."]) continue;
-                      PSSpecifier *slotSpec = [PSSpecifier preferenceSpecifierWithName:slot target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-                      slotSpec.buttonAction = @selector(switchToSlot:);
-                      [slotSpec setProperty:slot forKey:@"slot"];
-                      [specs addObject:slotSpec];
+                      PSSpecifier *sp = [PSSpecifier preferenceSpecifierWithName:slot target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                      sp.buttonAction = @selector(switchToSlot:);
+                      [sp setProperty:slot forKey:@"slot"];
+                      [s addObject:sp];
                   }
-
-                  _specifiers = specs;
+                  
+                  _specifiers = s;
               }
               return _specifiers;
           }
 
           - (void)createSlot {
-              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"新建分身" message:@"输入名称" preferredStyle:UIAlertControllerStyleAlert];
-              [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-                  field.placeholder = @"名称";
-              }];
-              [alert addAction:[UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  NSString *name = alert.textFields.firstObject.text;
+              UIAlertController *a = [UIAlertController alertControllerWithTitle:@"新建分身" message:@"输入名称" preferredStyle:UIAlertControllerStyleAlert];
+              [a addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = @"例: 店铺A"; }];
+              [a addAction:[UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                  NSString *name = a.textFields.firstObject.text;
                   if (name.length) [self createSlotWithName:name];
               }]];
-              [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-              [self presentViewController:alert animated:YES completion:nil];
+              [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+              [self presentViewController:a animated:YES completion:nil];
           }
 
           - (void)createSlotWithName:(NSString *)name {
               NSString *path = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
-              if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return;
-              [[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+              if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                  [[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+                  
+                  // 生成独立配置
+                  NSDictionary *config = @{
+                      @"fakeIDFV": [[NSUUID UUID] UUIDString],
+                      @"fakeIDFA": [[NSUUID UUID] UUIDString],
+                      @"deviceName": @"iPhone 15 Pro",
+                      @"systemVersion": @"17.0",
+                      @"countryCode": @"US",
+                      @"languageCode": @"en",
+                      @"width": @1179,
+                      @"height": @2556
+                  };
+                  [config writeToFile:[path stringByAppendingPathComponent:@"config.plist"] atomically:YES];
+                  
+                  // 生成独立反指纹 JS
+                  NSString *js = [NSString stringWithFormat:@"(function(){"
+                                   "const orig=HTMLCanvasElement.prototype.toDataURL;"
+                                   "HTMLCanvasElement.prototype.toDataURL=function(){"
+                                   "  const ctx=this.getContext('2d');"
+                                   "  const d=ctx.getImageData(0,0,this.width,this.height);"
+                                   "  for(let i=0;i<d.data.length;i+=4){"
+                                   "    if(Math.random()<0.03)d.data[i]+=Math.floor(Math.random()*5)-2;"
+                                   "  }"
+                                   "  ctx.putImageData(d,0,0);"
+                                   "  return orig.apply(this,arguments);"
+                                   "};"
+                                   "const gp=WebGLRenderingContext.prototype.getParameter;"
+                                   "WebGLRenderingContext.prototype.getParameter=function(p){"
+                                   "  if(p===37445)return 'Apple %@ GPU';"
+                                   "  if(p===37446)return 'Apple M%@';"
+                                   "  return gp.call(this,p);"
+                                   "};"
+                                   "})();", name, name];
+                  [js writeToFile:[path stringByAppendingPathComponent:@"inject.js"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+              }
               [self switchToSlotWithName:name];
           }
 
@@ -318,34 +579,43 @@ jobs:
           }
 
           - (void)switchToSlotWithName:(NSString *)name {
-              NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
-              prefs[@"activeSlot"] = name;
-              [prefs writeToFile:kPrefsPath atomically:YES];
+              NSMutableDictionary *p = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
+              p[@"activeSlot"] = name;
+              p[@"needWipeKeychain"] = @YES;
+              [p writeToFile:kPrefsPath atomically:YES];
+              
               const char *args[] = {"killall", "-9", "Vinted", NULL};
               posix_spawn(NULL, "/usr/bin/killall", NULL, NULL, (char**)args, NULL);
+              
               _specifiers = nil;
               [self reloadSpecifiers];
+              
+              UIAlertController *a = [UIAlertController alertControllerWithTitle:@"切换成功" 
+                                                                         message:[NSString stringWithFormat:@"已切换到 %@\n指纹已更新", name]
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+              [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+              [self presentViewController:a animated:YES completion:nil];
           }
           @end
-          EOF
+          UI_EOF
 
-          cat > vintedisoui/Resources/Info.plist << 'EOF'
+          # ========== Info.plist ==========
+          cat > vintedisoui/Resources/Info.plist << 'INFO_EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>VintedIsoUI</string>
-          <key>CFBundleIdentifier</key><string>com.vinted.isolator.ui</string>
+          <key>CFBundleExecutable</key><string>VintedIsolatorUI</string>
+          <key>CFBundleIdentifier</key><string>com.vinted.advanced.isolator.ui</string>
+          <key>CFBundleName</key><string>Vinted隔离</string>
+          <key>CFBundleShortVersionString</key><string>4.0.0</string>
           </dict></plist>
-          EOF
+          INFO_EOF
 
-      - name: 编译插件
-        run: |
-          export THEOS=~/theos
-          export PATH=~/ios-toolchain/bin:$THEOS/bin:$PATH
+          # 编译
           make package
 
-      - name: 上传deb包
+      - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: VintedPlugin.deb
+          name: VintedAdvancedIsolator.deb
           path: packages/*.deb
