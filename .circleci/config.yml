@@ -35,11 +35,11 @@ stages:
 build:
   stage: build
   tags:
-    - saas-macos-medium-m1  # GitLab macOS M1 Runner，队列短！
+    - saas-macos-medium-m1
   script:
     # 生成 Makefile
     - |
-      cat > Makefile << 'EOF'
+      cat > Makefile \<< 'MAKEFILE_EOF'
       TARGET := iphone:clang:latest:15.0
       INSTALL_TARGET_PROCESSES = Vinted
       ARCHS = arm64
@@ -50,22 +50,22 @@ build:
       include $(THEOS)/makefiles/tweak.mk
       SUBPROJECTS += vintedisoui
       include $(THEOS)/makefiles/aggregate.mk
-      EOF
+      MAKEFILE_EOF
 
     # 生成 control 文件
     - |
-      cat > control << 'EOF'
+      cat > control \<< 'CONTROL_EOF'
       Package: com.vinted.isolator
       Name: Vinted分身隔离系统
       Depends: mobilesubstrate, preferenceloader
       Version: 3.0.0
       Architecture: iphoneos-arm64
       Section: Tweaks
-      EOF
+      CONTROL_EOF
 
     # 生成 Tweak.x（完整版）
     - |
-      cat > Tweak.x << 'TWEAK_EOF'
+      cat > Tweak.x \<< 'TWEAK_EOF'
       #import <UIKit/UIKit.h>
       #import <Security/Security.h>
 
@@ -176,19 +176,19 @@ build:
       }
       TWEAK_EOF
 
-    # UI 面板文件（精简版）
+    # UI 面板文件
     - |
       mkdir -p vintedisoui/Resources
-      cat > vintedisoui/Makefile << 'EOF'
+      cat > vintedisoui/Makefile \<< 'UI_MAKEFILE'
       include $(THEOS)/makefiles/common.mk
       BUNDLE_NAME = VintedIsoUI
       VintedIsoUI_FILES = RootListController.m
       VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
       include $(THEOS)/makefiles/bundle.mk
-      EOF
+      UI_MAKEFILE
 
     - |
-      cat > vintedisoui/RootListController.m << 'EOF'
+      cat > vintedisoui/RootListController.m \<< 'UI_M_EOF'
       #import <Preferences/PSListController.h>
       #import <spawn.h>
       #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
@@ -241,17 +241,17 @@ build:
           [self reloadSpecifiers];
       }
       @end
-      EOF
+      UI_M_EOF
 
     - |
-      cat > vintedisoui/Resources/Info.plist << 'EOF'
+      cat > vintedisoui/Resources/Info.plist \<< 'INFO_EOF'
       <?xml version="1.0" encoding="UTF-8"?>
       <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
       <plist version="1.0"><dict>
       <key>CFBundleExecutable</key><string>VintedIsoUI</string>
       <key>CFBundleIdentifier</key><string>com.vinted.isolator.ui</string>
       </dict></plist>
-      EOF
+      INFO_EOF
 
     # 编译
     - make package
