@@ -1,177 +1,107 @@
-name: 底层越狱插件云编译（缓存加速版）
+name: Vinted底层分身插件云编译
 
 on:
   workflow_dispatch:
-    inputs:
-      clean_cache:
-        description: '清除缓存重新编译'
-        required: false
-        default: 'false'
-        type: boolean
 
 jobs:
   build:
     runs-on: macos-13
-    
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ========== 缓存 Theos（核心加速） ==========
       - name: 缓存 Theos
         id: cache-theos
         uses: actions/cache@v3
         with:
           path: ~/theos
-          key: theos-${{ runner.os }}-v2
-          restore-keys: |
-            theos-${{ runner.os }}-v2
-            theos-${{ runner.os }}-
+          key: theos-macos-v1
 
-      # ========== 缓存 SDK ==========
-      - name: 缓存 iOS SDK
+      - name: 缓存 SDK
         id: cache-sdk
         uses: actions/cache@v3
         with:
-          path: ~/ios-sdks
-          key: ios-sdk-${{ runner.os }}-v1
-          restore-keys: |
-            ios-sdk-${{ runner.os }}-v1
+          path: ~/sdks
+          key: sdk-macos-v1
 
-      # ========== 缓存编译中间文件 ==========
-      - name: 缓存 .theos 编译产物
-        uses: actions/cache@v3
-        with:
-          path: |
-            .theos
-            **/.theos
-          key: build-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            build-${{ runner.os }}-
-
-      # ========== 安装 Theos（仅在缓存缺失时执行） ==========
-      - name: 安装 Theos
+      - name: 安装 Theos 和 SDK
         if: steps.cache-theos.outputs.cache-hit != 'true'
         run: |
-          echo "📦 下载 Theos（首次，后续会用缓存）..."
           git clone --depth 1 https://github.com/theos/theos.git ~/theos
-          echo "✅ Theos 安装完成"
-
-      # ========== 安装 SDK（仅在缓存缺失时执行） ==========
-      - name: 安装 iOS SDK
-        if: steps.cache-sdk.outputs.cache-hit != 'true'
-        run: |
-          echo "📦 下载 iOS SDK（首次，后续会用缓存）..."
-          git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git ~/ios-sdks
+          git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git ~/sdks
           mkdir -p ~/theos/sdks
-          cp -r ~/ios-sdks/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || \
-          cp -r ~/ios-sdks/iPhoneOS15.0.sdk ~/theos/sdks/
-          echo "✅ SDK 安装完成"
+          cp -r ~/sdks/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || \
+          cp -r ~/sdks/iPhoneOS15.0.sdk ~/theos/sdks/
 
-      # ========== 设置环境变量 ==========
-      - name: 设置编译环境
+      - name: 设置环境变量
         run: |
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "$HOME/theos/bin" >> $GITHUB_PATH
-          echo "✅ 环境变量已设置"
 
-      # ========== 创建底层 Hook 源码 ==========
       - name: 生成插件源码
         run: |
           mkdir -p vintedisoui/Resources
-          
-          # 验证 Theos 存在
-          if [ ! -d "$HOME/theos" ]; then
-            echo "❌ Theos 目录不存在！"
-            exit 1
-          fi
 
-      # ========== Makefile ==========
-          cat > Makefile << 'MAKEFILE_EOF'
+          # Makefile
+          cat > Makefile << 'MAKEFILE_END'
           TARGET := iphone:clang:latest:15.0
           INSTALL_TARGET_PROCESSES = Vinted
           ARCHS = arm64 arm64e
           GO_EASY_ON_ME = 1
-          
           include $(THEOS)/makefiles/common.mk
-          
           TWEAK_NAME = VintedIsolator
-          VintedIsolator_FILES = Tweak.x hook_socket.c hook_fs.c hook_mach.c
-          VintedIsolator_FRAMEWORKS = UIKit Security Foundation SystemConfiguration Network CoreTelephony
-          VintedIsolator_CFLAGS = -fobjc-arc -Wall -O2 -D_LOW_LEVEL_HOOK_
-          VintedIsolator_LDFLAGS = -lsubstrate -ldl -lresolv
-          VintedIsolator_PRIVATE_FRAMEWORKS = AppSupport
-          
+          VintedIsolator_FILES = Tweak.x
+          VintedIsolator_FRAMEWORKS = UIKit Security Foundation SystemConfiguration
+          VintedIsolator_CFLAGS = -fobjc-arc -Wall -O2
           include $(THEOS)/makefiles/tweak.mk
-          
           SUBPROJECTS += vintedisoui
           include $(THEOS)/makefiles/aggregate.mk
-          MAKEFILE_EOF
+          MAKEFILE_END
 
-      # ========== Control ==========
-          cat > control << 'CONTROL_EOF'
+          # control
+          cat > control << 'CONTROL_END'
           Package: com.vinted.bottom.isolator
           Name: Vinted底层分身隔离系统
-          Depends: firmware (>= 15.0), mobilesubstrate (>= 0.9.5000), preferenceloader (>= 2.2)
+          Depends: mobilesubstrate, preferenceloader
           Version: 2.0.0
           Architecture: iphoneos-arm64
-          Description: 【底层级Hook】Mach-O加载拦截 + Socket重定向 + 文件系统沙盒 + sysctl伪装
+          Description: 底层Hook级别分身隔离，支持无限分身、IDFA/IDFV伪造、路径重定向
           Section: Tweaks
           Author: VintedTeam
           Maintainer: VintedTeam
-          Priority: optional
-          CONTROL_EOF
+          CONTROL_END
 
-      # ========== 过滤 Plist ==========
-          cat > VintedIsolator.plist << 'PLIST_EOF'
+          # Filter plist
+          cat > VintedIsolator.plist << 'PLIST_END'
           {
             Filter = {
-              Bundles = (
-                "fr.vinted.vinted",
-                "com.vinted.app"
-              );
-              Executables = (
-                "Vinted"
-              );
+              Bundles = ("fr.vinted.vinted", "com.vinted.app");
             };
           }
-          PLIST_EOF
+          PLIST_END
 
-      # ========== Tweak.x（ObjC 层 Hook） ==========
-          cat > Tweak.x << 'TWEAK_EOF'
+          # Tweak.x
+          cat > Tweak.x << 'TWEAK_END'
           #import <UIKit/UIKit.h>
           #import <Security/Security.h>
-          #import <SystemConfiguration/SystemConfiguration.h>
-          #import <dlfcn.h>
-          
+
           #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
-          
-          // C 函数声明（来自底层 hook 文件）
-          extern void init_socket_hooks(void);
-          extern void init_fs_hooks(void);
-          extern void init_mach_hooks(void);
-          extern void set_current_slot(const char *slot);
-          extern const char* get_current_slot(void);
-          
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
           static NSString* getActiveSlot() {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               NSString *slot = prefs[@"activeSlot"];
-              if (!slot.length) slot = @"Default";
-              set_current_slot([slot UTF8String]);
-              return slot;
+              return slot.length > 0 ? slot : @"Default";
           }
-          
+
           static NSString* getSlotConfigPath() {
               NSString *slot = getActiveSlot();
               return [NSString stringWithFormat:@"%@/%@/config.plist", kSlotsBasePath, slot];
           }
-          
-          // Hook UIDevice
+
+          // Hook UIDevice - 伪造设备信息
           %hook UIDevice
           - (NSUUID *)identifierForVendor {
-              NSString *configPath = getSlotConfigPath();
-              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
+              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
               if (config[@"fakeIDFV"]) {
                   return [[NSUUID alloc] initWithUUIDString:config[@"fakeIDFV"]];
               }
@@ -181,70 +111,89 @@ jobs:
               NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
               return config[@"deviceName"] ?: @"iPhone";
           }
-          - (NSString *)systemName { return @"iOS"; }
           - (NSString *)systemVersion {
               NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
               return config[@"systemVersion"] ?: @"17.0";
           }
           %end
-          
-          // Hook ASIdentifierManager
+
+          // Hook ASIdentifierManager - 伪造广告标识符
           %hook ASIdentifierManager
           - (NSUUID *)advertisingIdentifier {
-              NSString *configPath = getSlotConfigPath();
-              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
+              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
               if (config[@"fakeIDFA"]) {
                   return [[NSUUID alloc] initWithUUIDString:config[@"fakeIDFA"]];
               }
               return %orig;
           }
-          - (BOOL)isAdvertisingTrackingEnabled { return NO; }
-          %end
-          
-          // Hook UIScreen（屏幕信息伪装）
-          %hook UIScreen
-          - (CGRect)bounds {
-              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-              if (config[@"fakeWidth"] && config[@"fakeHeight"]) {
-                  return CGRectMake(0, 0, 
-                      [config[@"fakeWidth"] floatValue], 
-                      [config[@"fakeHeight"] floatValue]);
-              }
-              return %orig;
-          }
-          - (CGFloat)scale {
-              NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-              return config[@"fakeScale"] ? [config[@"fakeScale"] floatValue] : %orig;
+          - (BOOL)isAdvertisingTrackingEnabled {
+              return NO;
           }
           %end
-          
-          // Hook NSLocale（语言/地区伪装）
+
+          // Hook NSLocale - 伪造地区语言
           %hook NSLocale
           - (NSString *)objectForKey:(id)key {
               if ([key isEqualToString:NSLocaleCountryCode]) {
                   NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-                  return config[@"fakeCountryCode"] ?: %orig;
+                  return config[@"countryCode"] ?: %orig;
               }
               if ([key isEqualToString:NSLocaleLanguageCode]) {
                   NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-                  return config[@"fakeLanguageCode"] ?: %orig;
+                  return config[@"languageCode"] ?: %orig;
               }
               return %orig;
           }
           %end
-          
-          // Keychain 清理 Hook
+
+          // Hook 文件操作 - 路径重定向
+          #include <fcntl.h>
+          #include <stdarg.h>
+
+          static int (*orig_open)(const char *path, int oflag, ...);
+
+          int fake_open(const char *path, int oflag, ...) {
+              NSString *nsPath = [NSString stringWithUTF8String:path];
+              NSString *slot = getActiveSlot();
+
+              NSArray *redirectPaths = @[
+                  @"/Library/Caches", @"/Library/WebKit",
+                  @"/Library/Cookies", @"/Documents"
+              ];
+
+              for (NSString *rp in redirectPaths) {
+                  if ([nsPath containsString:rp]) {
+                      NSString *slotDir = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, slot];
+                      NSString *newPath = [slotDir stringByAppendingPathComponent:[nsPath lastPathComponent]];
+                      [[NSFileManager defaultManager] createDirectoryAtPath:slotDir
+                                                withIntermediateDirectories:YES
+                                                                 attributes:nil
+                                                                      error:nil];
+                      va_list args;
+                      va_start(args, oflag);
+                      mode_t mode = va_arg(args, mode_t);
+                      va_end(args);
+                      return orig_open([newPath UTF8String], oflag, mode);
+                  }
+              }
+
+              va_list args;
+              va_start(args, oflag);
+              mode_t mode = va_arg(args, mode_t);
+              va_end(args);
+              return orig_open(path, oflag, mode);
+          }
+
+          // Keychain 清理
           %hookf(SecItemCopyMatching, OSStatus, CFDictionaryRef query, CFTypeRef *result) {
               NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
               if ([prefs[@"needWipeKeychain"] boolValue]) {
-                  NSArray *secClasses = @[
+                  NSArray *classes = @[
                       (__bridge id)kSecClassGenericPassword,
-                      (__bridge id)kSecClassInternetPassword,
-                      (__bridge id)kSecClassCertificate,
-                      (__bridge id)kSecClassKey
+                      (__bridge id)kSecClassInternetPassword
                   ];
-                  for (id secClass in secClasses) {
-                      NSDictionary *clearQuery = @{(__bridge id)kSecClass: secClass};
+                  for (id cls in classes) {
+                      NSDictionary *clearQuery = @{(__bridge id)kSecClass: cls};
                       SecItemDelete((__bridge CFDictionaryRef)clearQuery);
                   }
                   NSMutableDictionary *mutablePrefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
@@ -254,555 +203,202 @@ jobs:
               }
               return %orig;
           }
-          
+
           %ctor {
               @autoreleasepool {
-                  NSString *processName = [[NSProcessInfo processInfo] processName];
-                  if ([processName isEqualToString:@"Vinted"] || [processName containsString:@"Vinted"]) {
-                      // 创建基础目录
-                      [[NSFileManager defaultManager] createDirectoryAtPath:kSlotsBasePath 
-                                                withIntermediateDirectories:YES 
-                                                                 attributes:nil 
+                  NSString *name = [[NSProcessInfo processInfo] processName];
+                  if ([name containsString:@"Vinted"]) {
+                      [[NSFileManager defaultManager] createDirectoryAtPath:kSlotsBasePath
+                                                withIntermediateDirectories:YES
+                                                                 attributes:nil
                                                                       error:nil];
-                      
-                      // 初始化默认配置
+
                       NSString *defaultSlot = [NSString stringWithFormat:@"%@/Default", kSlotsBasePath];
                       if (![[NSFileManager defaultManager] fileExistsAtPath:defaultSlot]) {
-                          [[NSFileManager defaultManager] createDirectoryAtPath:defaultSlot 
-                                                    withIntermediateDirectories:YES 
-                                                                     attributes:nil 
+                          [[NSFileManager defaultManager] createDirectoryAtPath:defaultSlot
+                                                    withIntermediateDirectories:YES
+                                                                     attributes:nil
                                                                           error:nil];
-                          NSString *defaultConfig = [NSString stringWithFormat:@"%@/config.plist", defaultSlot];
-                          NSDictionary *defaultConfigDict = @{
+                          NSString *configPath = [NSString stringWithFormat:@"%@/config.plist", defaultSlot];
+                          NSDictionary *config = @{
                               @"fakeIDFV": [[NSUUID UUID] UUIDString],
                               @"fakeIDFA": [[NSUUID UUID] UUIDString],
                               @"deviceName": @"iPhone 15 Pro",
                               @"systemVersion": @"17.0",
-                              @"createdAt": [NSDate date]
+                              @"countryCode": @"US",
+                              @"languageCode": @"en"
                           };
-                          [defaultConfigDict writeToFile:defaultConfig atomically:YES];
+                          [config writeToFile:configPath atomically:YES];
                       }
-                      
-                      // 初始化底层 Hook
-                      init_socket_hooks();
-                      init_fs_hooks();
-                      init_mach_hooks();
-                      
-                      // 设置当前 slot
-                      getActiveSlot();
-                      
+
+                      MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
                       %init;
                   }
               }
           }
-          TWEAK_EOF
+          TWEAK_END
 
-      # ========== hook_socket.c（网络层底层 Hook） ==========
-          cat > hook_socket.c << 'SOCKET_EOF'
-          #include <stdio.h>
-          #include <string.h>
-          #include <sys/socket.h>
-          #include <netinet/in.h>
-          #include <arpa/inet.h>
-          #include <dlfcn.h>
-          #include <substrate.h>
-          #include <unistd.h>
-          #include <fcntl.h>
-          
-          static char current_slot[256] = "Default";
-          static char fake_ip[256] = "";
-          
-          void set_current_slot(const char *slot) {
-              strncpy(current_slot, slot, sizeof(current_slot) - 1);
-              // 加载 slot 配置
-              char config_path[512];
-              snprintf(config_path, sizeof(config_path), 
-                  "/var/mobile/VintedBottomSlots/%s/config.plist", current_slot);
-              
-              // 从 plist 读取伪装 IP（简化版，完整版需要 plist 解析）
-              // 这里先用默认值
-              strcpy(fake_ip, "192.168.1.100");
-          }
-          
-          const char* get_current_slot(void) {
-              return current_slot;
-          }
-          
-          // Hook connect() - 修改连接目标
-          static int (*orig_connect)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
-          
-          int fake_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-              // 可以在这里重定向连接
-              // 例如将特定 IP 重定向到代理
-              return orig_connect(sockfd, addr, addrlen);
-          }
-          
-          // Hook gethostbyname() - DNS 劫持
-          struct hostent* (*orig_gethostbyname)(const char *name);
-          
-          struct hostent* fake_gethostbyname(const char *name) {
-              // 可以在这里劫持特定域名的解析
-              if (strstr(name, "vinted") != NULL) {
-                  // 记录日志或修改解析
-                  printf("[Vinted] DNS query: %s\n", name);
-              }
-              return orig_gethostbyname(name);
-          }
-          
-          // Hook getsockname() - 伪造本机 IP
-          static int (*orig_getsockname)(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-          
-          int fake_getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-              int ret = orig_getsockname(sockfd, addr, addrlen);
-              if (ret == 0 && addr && addr->sa_family == AF_INET) {
-                  struct sockaddr_in *sin = (struct sockaddr_in *)addr;
-                  if (strlen(fake_ip) > 0) {
-                      inet_pton(AF_INET, fake_ip, &sin->sin_addr);
-                  }
-              }
-              return ret;
-          }
-          
-          void init_socket_hooks(void) {
-              MSHookFunction((void *)connect, (void *)fake_connect, (void **)&orig_connect);
-              MSHookFunction((void *)gethostbyname, (void *)fake_gethostbyname, (void **)&orig_gethostbyname);
-              MSHookFunction((void *)getsockname, (void *)fake_getsockname, (void **)&orig_getsockname);
-              printf("[Vinted] Socket hooks initialized\n");
-          }
-          SOCKET_EOF
-
-      # ========== hook_fs.c（文件系统底层 Hook） ==========
-          cat > hook_fs.c << 'FS_EOF'
-          #include <stdio.h>
-          #include <string.h>
-          #include <stdlib.h>
-          #include <unistd.h>
-          #include <fcntl.h>
-          #include <dlfcn.h>
-          #include <sys/stat.h>
-          #include <dirent.h>
-          #include <substrate.h>
-          
-          extern const char* get_current_slot(void);
-          
-          static char base_path[512] = "/var/mobile/VintedBottomSlots";
-          
-          // 重定向路径
-          static void redirect_path(const char *original, char *redirected, size_t size) {
-              const char *slot = get_current_slot();
-              
-              // 需要重定向的路径列表
-              const char *redirect_dirs[] = {
-                  "/Library/Caches",
-                  "/Library/WebKit",
-                  "/Library/Cookies",
-                  "/Library/Safari",
-                  "/Documents",
-                  "/tmp",
-                  NULL
-              };
-              
-              for (int i = 0; redirect_dirs[i] != NULL; i++) {
-                  if (strstr(original, redirect_dirs[i]) != NULL) {
-                      const char *filename = strrchr(original, '/');
-                      filename = filename ? filename + 1 : original;
-                      snprintf(redirected, size, "%s/%s/%s", base_path, slot, filename);
-                      // 确保目录存在
-                      char dir[512];
-                      snprintf(dir, sizeof(dir), "%s/%s", base_path, slot);
-                      mkdir(dir, 0755);
-                      return;
-                  }
-              }
-              
-              strncpy(redirected, original, size);
-          }
-          
-          // Hook open()
-          static int (*orig_open)(const char *path, int oflag, ...);
-          
-          int fake_open(const char *path, int oflag, ...) {
-              char redirected[512];
-              redirect_path(path, redirected, sizeof(redirected));
-              
-              if (strcmp(path, redirected) != 0) {
-                  // 路径被重定向了
-                  mode_t mode = 0;
-                  if (oflag & O_CREAT) {
-                      va_list args;
-                      va_start(args, oflag);
-                      mode = va_arg(args, mode_t);
-                      va_end(args);
-                      return orig_open(redirected, oflag, mode);
-                  }
-                  return orig_open(redirected, oflag);
-              }
-              
-              va_list args;
-              va_start(args, oflag);
-              mode_t mode = va_arg(args, mode_t);
-              va_end(args);
-              return orig_open(path, oflag, mode);
-          }
-          
-          // Hook stat()
-          static int (*orig_stat)(const char *path, struct stat *buf);
-          
-          int fake_stat(const char *path, struct stat *buf) {
-              char redirected[512];
-              redirect_path(path, redirected, sizeof(redirected));
-              return orig_stat(redirected, buf);
-          }
-          
-          // Hook access()
-          static int (*orig_access)(const char *path, int mode);
-          
-          int fake_access(const char *path, int mode) {
-              char redirected[512];
-              redirect_path(path, redirected, sizeof(redirected));
-              return orig_access(redirected, mode);
-          }
-          
-          void init_fs_hooks(void) {
-              MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
-              MSHookFunction((void *)stat, (void *)fake_stat, (void **)&orig_stat);
-              MSHookFunction((void *)access, (void *)fake_access, (void **)&orig_access);
-              printf("[Vinted] FS hooks initialized\n");
-          }
-          FS_EOF
-
-      # ========== hook_mach.c（内核/系统调用层 Hook） ==========
-          cat > hook_mach.c << 'MACH_EOF'
-          #include <stdio.h>
-          #include <string.h>
-          #include <sys/utsname.h>
-          #include <sys/sysctl.h>
-          #include <dlfcn.h>
-          #include <substrate.h>
-          #include <mach/mach.h>
-          #include <mach/mach_time.h>
-          
-          extern const char* get_current_slot(void);
-          
-          static char fake_machine[128] = "iPhone15,2";
-          static char fake_model[128] = "D83AP";
-          
-          // 加载 slot 配置中的伪装信息
-          static void load_mach_config(void) {
-              const char *slot = get_current_slot();
-              char config_path[512];
-              snprintf(config_path, sizeof(config_path), 
-                  "/var/mobile/VintedBottomSlots/%s/config.plist", slot);
-              
-              // 简化版：使用默认值
-              // 完整版需要解析 plist
-              strcpy(fake_machine, "iPhone15,2");  // iPhone 15 Pro
-              strcpy(fake_model, "D83AP");
-          }
-          
-          // Hook uname() - 伪造系统信息
-          static int (*orig_uname)(struct utsname *name);
-          
-          int fake_uname(struct utsname *name) {
-              int ret = orig_uname(name);
-              if (ret == 0 && name) {
-                  load_mach_config();
-                  strcpy(name->machine, fake_machine);
-                  strcpy(name->nodename, "iPhone");
-                  strcpy(name->sysname, "Darwin");
-                  // 可修改 version/release
-              }
-              return ret;
-          }
-          
-          // Hook sysctl() - 伪造内核参数
-          static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-          
-          int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-              int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-              
-              if (ret == 0 && oldp && oldlenp) {
-                  // 伪造 hw.machine
-                  if (namelen >= 2 && name[0] == CTL_HW && name[1] == HW_MACHINE) {
-                      load_mach_config();
-                      size_t len = strlen(fake_machine) + 1;
-                      if (len <= *oldlenp) {
-                          strcpy((char *)oldp, fake_machine);
-                          *oldlenp = len;
-                      }
-                  }
-                  // 伪造 hw.model
-                  else if (namelen >= 2 && name[0] == CTL_HW && name[1] == HW_MODEL) {
-                      load_mach_config();
-                      size_t len = strlen(fake_model) + 1;
-                      if (len <= *oldlenp) {
-                          strcpy((char *)oldp, fake_model);
-                          *oldlenp = len;
-                      }
-                  }
-              }
-              
-              return ret;
-          }
-          
-          void init_mach_hooks(void) {
-              MSHookFunction((void *)uname, (void *)fake_uname, (void **)&orig_uname);
-              MSHookFunction((void *)sysctl, (void *)fake_sysctl, (void **)&orig_sysctl);
-              printf("[Vinted] Mach hooks initialized\n");
-          }
-          MACH_EOF
-
-      # ========== UI 面板 Makefile ==========
-          cat > vintedisoui/Makefile << 'UI_MAKEFILE'
+          # UI Makefile
+          cat > vintedisoui/Makefile << 'UI_MAKEFILE_END'
           include $(THEOS)/makefiles/common.mk
           BUNDLE_NAME = VintedIsoUI
           VintedIsoUI_FILES = RootListController.m
           VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
-          VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation SystemConfiguration
+          VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation
           VintedIsoUI_PRIVATE_FRAMEWORKS = Preferences
           include $(THEOS)/makefiles/bundle.mk
-          UI_MAKEFILE
+          UI_MAKEFILE_END
 
-      # ========== UI 主文件 ==========
-          cat > vintedisoui/RootListController.m << 'UI_M_EOF'
+          # UI RootListController.m
+          cat > vintedisoui/RootListController.m << 'UI_M_END'
           #import <Preferences/PSListController.h>
           #import <Preferences/PSSpecifier.h>
           #import <spawn.h>
           #include <sys/wait.h>
-          
+
           #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.bottom.isolator.plist"
-          #define kSlotsBasePath @"/var/mobile/VintedBottomSlots"
-          
-          @interface VintedIsoRootListController : PSListController
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
+          @interface VintedRootListController : PSListController
           @property (nonatomic, strong) NSString *currentIP;
-          @property (nonatomic, strong) NSString *currentLocation;
           @end
-          
-          @implementation VintedIsoRootListController
-          
+
+          @implementation VintedRootListController
+
           - (void)viewDidLoad {
               [super viewDidLoad];
-              [self loadCurrentIPInfo];
+              [self fetchIPInfo];
           }
-          
-          - (void)loadCurrentIPInfo {
-              NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-              self.currentIP = prefs[@"lastIP"] ?: @"检测中...";
-              self.currentLocation = prefs[@"lastLocation"] ?: @"检测中...";
-              [self reloadSpecifiers];
-              
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                  [self refreshIPInfo];
-              });
-          }
-          
-          - (void)refreshIPInfo {
+
+          - (void)fetchIPInfo {
               NSURL *url = [NSURL URLWithString:@"https://ipapi.co/json/"];
-              NSURLRequest *request = [NSURLRequest requestWithURL:url timeoutInterval:5.0];
               NSURLSession *session = [NSURLSession sharedSession];
-              
-              [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                  if (!error && data) {
+              [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                  if (!err && data) {
                       NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                       dispatch_async(dispatch_get_main_queue(), ^{
                           if (json[@"ip"]) self.currentIP = json[@"ip"];
-                          if (json[@"country_name"]) {
-                              self.currentLocation = [NSString stringWithFormat:@"%@ %@", json[@"country_name"], json[@"city"] ?: @""];
-                          }
-                          NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
-                          prefs[@"lastIP"] = self.currentIP;
-                          prefs[@"lastLocation"] = self.currentLocation;
-                          [prefs writeToFile:kPrefsPath atomically:YES];
                           [self reloadSpecifiers];
                       });
                   }
               }] resume];
           }
-          
+
           - (NSArray *)specifiers {
               if (!_specifiers) {
                   NSMutableArray *specs = [NSMutableArray array];
-                  
-                  // 网络信息
-                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🌐 底层网络信息"]];
-                  
-                  PSSpecifier *ipSpec = [PSSpecifier preferenceSpecifierWithName:@"真实出口 IP" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🌐 网络信息"]];
+                  PSSpecifier *ipSpec = [PSSpecifier preferenceSpecifierWithName:@"当前IP" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
                   [ipSpec setProperty:self.currentIP ?: @"检测中..." forKey:@"staticText"];
                   [specs addObject:ipSpec];
-                  
-                  PSSpecifier *locSpec = [PSSpecifier preferenceSpecifierWithName":"地理位置" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
-                  [locSpec setProperty:self.currentLocation ?: @"检测中..." forKey:@"staticText"];
-                  [specs addObject:locSpec];
-                  
-                  // 分身管理
-                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🔧 底层分身管理（Hook: socket/fs/mach）"]];
-                  
+
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"🔧 分身管理"]];
                   NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-                  NSString *activeSlot = prefs[@"activeSlot"] ?: @"Default";
-                  PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前底层环境" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
-                  [activeSpec setProperty:activeSlot forKey:@"staticText"];
+                  NSString *active = prefs[@"activeSlot"] ?: @"Default";
+                  PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前分身" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+                  [activeSpec setProperty:active forKey:@"staticText"];
                   [specs addObject:activeSpec];
-                  
-                  PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建底层分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-                  addBtn.buttonAction = @selector(createNewSlot);
+
+                  PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                  addBtn.buttonAction = @selector(createSlot);
                   [specs addObject:addBtn];
-                  
-                  // 分身列表
-                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"📁 已有底层分身"]];
-                  
+
+                  [specs addObject:[PSSpecifier groupSpecifierWithName:@"📁 分身列表"]];
                   NSArray *slots = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil];
-                  for (NSString *slotName in slots) {
-                      if ([slotName hasPrefix:@"."]) continue;
-                      PSSpecifier *slotSpec = [PSSpecifier preferenceSpecifierWithName:slotName target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                  for (NSString *slot in slots) {
+                      if ([slot hasPrefix:@"."]) continue;
+                      PSSpecifier *slotSpec = [PSSpecifier preferenceSpecifierWithName:slot target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
                       slotSpec.buttonAction = @selector(switchToSlot:);
-                      [slotSpec setProperty:slotName forKey:@"slotName"];
+                      [slotSpec setProperty:slot forKey:@"slot"];
                       [specs addObject:slotSpec];
                   }
-                  
+
                   _specifiers = specs;
               }
               return _specifiers;
           }
-          
-          - (void)createNewSlot {
-              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"新建底层分身"
-                                                                             message:@"输入分身名称（将完全独立隔离）"
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-              [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-                  textField.placeholder = @"例：店铺A-英区";
+
+          - (void)createSlot {
+              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"新建分身" message:@"输入名称" preferredStyle:UIAlertControllerStyleAlert];
+              [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+                  field.placeholder = @"例: 店铺A";
               }];
-              
-              UIAlertAction *create = [UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+              [alert addAction:[UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                   NSString *name = alert.textFields.firstObject.text;
-                  if (name.length > 0) {
-                      [self performSelector:@selector(createSlotWithName:) withObject:name afterDelay:0.1];
-                  }
-              }];
-              
-              [alert addAction:create];
+                  if (name.length) [self createSlotWithName:name];
+              }]];
               [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
               [self presentViewController:alert animated:YES completion:nil];
           }
-          
+
           - (void)createSlotWithName:(NSString *)name {
-              NSString *slotPath = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
-              NSString *configPath = [NSString stringWithFormat:@"%@/config.plist", slotPath];
-              
-              if ([[NSFileManager defaultManager] fileExistsAtPath:slotPath]) {
-                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"分身已存在" preferredStyle:UIAlertControllerStyleAlert];
-                  [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                  [self presentViewController:alert animated:YES completion:nil];
-                  return;
-              }
-              
-              [[NSFileManager defaultManager] createDirectoryAtPath:slotPath withIntermediateDirectories:YES attributes:nil error:nil];
-              
+              NSString *path = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
+              if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return;
+              [[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
               NSDictionary *config = @{
                   @"fakeIDFV": [[NSUUID UUID] UUIDString],
                   @"fakeIDFA": [[NSUUID UUID] UUIDString],
                   @"deviceName": @"iPhone 15 Pro",
-                  @"systemVersion": @"17.0",
-                  @"fakeCountryCode": @"US",
-                  @"fakeLanguageCode": @"en",
-                  @"createdAt": [NSDate date]
+                  @"systemVersion": @"17.0"
               };
-              [config writeToFile:configPath atomically:YES];
-              
+              [config writeToFile:[NSString stringWithFormat:@"%@/config.plist", path] atomically:YES];
               [self switchToSlotWithName:name];
           }
-          
+
           - (void)switchToSlot:(PSSpecifier *)spec {
-              NSString *slotName = [spec propertyForKey:@"slotName"];
-              if (slotName) {
-                  [self switchToSlotWithName:slotName];
-              }
+              [self switchToSlotWithName:[spec propertyForKey:@"slot"]];
           }
-          
-          - (void)switchToSlotWithName:(NSString *)slotName {
+
+          - (void)switchToSlotWithName:(NSString *)name {
               NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
-              prefs[@"activeSlot"] = slotName;
+              prefs[@"activeSlot"] = name;
               prefs[@"needWipeKeychain"] = @YES;
               [prefs writeToFile:kPrefsPath atomically:YES];
-              
-              // 杀 App 使底层 Hook 重新读取配置
-              pid_t pid;
-              int status;
+
               const char *args[] = {"killall", "-9", "Vinted", NULL};
+              pid_t pid;
               posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
-              waitpid(pid, &status, 0);
-              
+              waitpid(pid, NULL, 0);
+
               _specifiers = nil;
               [self reloadSpecifiers];
-              
-              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"底层切换成功"
-                                                                             message:[NSString stringWithFormat:@"已切换到「%@」\n底层 Hook 已重新加载", slotName]
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-              [alert addAction:[UIAlertAction actionWithTitle:@"重启 App" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  system("open com.vinted.vinted");
-              }]];
+
+              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"切换成功" message:[NSString stringWithFormat:@"已切换到 %@", name] preferredStyle:UIAlertControllerStyleAlert];
+              [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
               [self presentViewController:alert animated:YES completion:nil];
           }
-          
           @end
-          UI_M_EOF
+          UI_M_END
 
-      # ========== Info.plist ==========
-          cat > vintedisoui/Resources/Info.plist << 'INFO_PLIST'
+          # Info.plist
+          cat > vintedisoui/Resources/Info.plist << 'INFO_END'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
               <key>CFBundleExecutable</key>
               <string>VintedIsoUI</string>
               <key>CFBundleIdentifier</key>
               <string>com.vinted.bottom.isolator.ui</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
               <key>CFBundleName</key>
-              <string>Vinted底层隔离</string>
-              <key>CFBundlePackageType</key>
-              <string>BNDL</string>
+              <string>Vinted隔离</string>
               <key>CFBundleShortVersionString</key>
-              <string>2.0.0</string>
-              <key>CFBundleVersion</key>
               <string>2.0.0</string>
           </dict>
           </plist>
-          INFO_PLIST
+          INFO_END
 
-          echo "✅ 所有源码已生成"
+          echo "✅ 源码生成完成"
 
-      # ========== 编译 ==========
       - name: 编译插件
         run: |
           export THEOS=$HOME/theos
           export PATH=$THEOS/bin:$PATH
-          
-          echo "📂 当前目录："
-          ls -la
-          
-          echo "🔨 开始编译..."
-          make clean 2>/dev/null || true
           make package
-          
-          echo "✅ 编译完成"
 
-      # ========== 上传产物 ==========
       - name: 上传 deb 包
         uses: actions/upload-artifact@v4
         with:
           name: VintedBottomIsolator.deb
           path: packages/*.deb
-          compression-level: 0
-
-      - name: 上传编译日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            *.log
-            .theos/**/*.log
-          if-no-files-found: ignore
