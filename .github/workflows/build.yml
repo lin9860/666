@@ -1,4 +1,4 @@
-name: Vinted插件Linux编译(完整版)
+name: Vinted插件Linux编译(iphoneports工具链)
 
 on:
   workflow_dispatch:
@@ -9,189 +9,198 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 安装必需的系统依赖
-      - name: 安装依赖工具
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git make curl unzip \
-            build-essential fakeroot \
-            clang-16 lld-16 \
-            libxml2-dev libssl-dev \
-            libtapi-dev \
-            cpio
+          sudo apt-get install -y git make curl unzip build-essential
 
-      # 2. 获取 iOS SDK (从Theos官方SDK仓库)
+      - name: 下载 iphoneports 工具链
+        run: |
+          mkdir -p ~/toolchain
+          cd ~/toolchain
+          # 下载预编译的 iOS 交叉编译工具链
+          curl -L -o toolchain.tar.xz https://github.com/iphoneports/toolchain/releases/download/20240121/iphoneports-toolchain-ubuntu-latest.tar.xz
+          tar -xf toolchain.tar.xz
+          echo "$HOME/toolchain/usr/bin" >> $GITHUB_PATH
+
       - name: 下载 iOS SDK
         run: |
           mkdir -p ~/sdks
           cd ~/sdks
-          git clone --depth 1 https://github.com/theos/sdks
-          mv sdks/*.sdk . || true
-          ls -la
+          git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git .
+          mkdir -p ~/theos/sdks
+          cp -r iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || cp -r iPhoneOS15.0.sdk ~/theos/sdks/
 
-      # 3. 构建 iOS 交叉编译工具链 (使用 cctools-port)
-      - name: 构建 iOS 工具链
-        run: |
-          mkdir -p ~/ios-build
-          cd ~/ios-build
-          
-          # 克隆 cctools-port
-          git clone https://github.com/tpoechtrager/cctools-port.git
-          
-          # 准备 SDK 包 (cctools-port 构建脚本需要 .tar.xz 格式)
-          SDK_PATH=$(find ~/sdks -name "iPhoneOS*.sdk" -type d | head -n 1)
-          if [ -z "$SDK_PATH" ]; then
-            echo "❌ 找不到 iOS SDK"
-            exit 1
-          fi
-          echo "找到 SDK: $SDK_PATH"
-          
-          # 打包 SDK
-          cd $(dirname $SDK_PATH)
-          SDK_NAME=$(basename $SDK_PATH)
-          tar -cf - "$SDK_NAME" | xz -9 -c - > ~/ios-build/iPhoneSDK.tar.xz
-          cd ~/ios-build
-          
-          # 运行构建脚本 (构建 arm64 工具链)
-          cd cctools-port/usage_examples/ios_toolchain
-          chmod +x ./build.sh
-          ./build.sh ~/ios-build/iPhoneSDK.tar.xz arm64
-          
-          # 将工具链复制到标准位置
-          mkdir -p ~/ios-toolchain
-          cp -r target/* ~/ios-toolchain/
-          
-          echo "✅ iOS 工具链构建完成"
-          ls -la ~/ios-toolchain/bin/
-
-      # 4. 设置 Theos
       - name: 安装 Theos
         run: |
-          git clone --recursive https://github.com/theos/theos.git ~/theos
+          git clone --depth 1 https://github.com/theos/theos.git ~/theos
           echo "THEOS=~/theos" >> $GITHUB_ENV
           echo "~/theos/bin" >> $GITHUB_PATH
-          
-          # 配置 Theos 使用我们刚刚构建的工具链
-          cat >> ~/theos/makefiles/targets/Darwin/iphone.mk << 'EOF'
-          # Linux cross-compile toolchain
+
+      - name: 配置 Theos 使用 iphoneports 工具链
+        run: |
+          cat > ~/theos/makefiles/targets/Darwin/iphone_Linux.mk << 'EOF'
           ifeq ($(shell uname),Linux)
-            # 查找我们构建的工具链
-            IOS_TOOLCHAIN := $(shell echo ~)/ios-toolchain
-            ifneq ($(wildcard $(IOS_TOOLCHAIN)/bin/*),)
-              TARGET_CC := $(IOS_TOOLCHAIN)/bin/arm-apple-darwin11-clang
-              TARGET_CXX := $(IOS_TOOLCHAIN)/bin/arm-apple-darwin11-clang++
-              TARGET_STRIP := $(IOS_TOOLCHAIN)/bin/arm-apple-darwin11-strip
-              TARGET_CODESIGN := $(IOS_TOOLCHAIN)/bin/arm-apple-darwin11-ldid
-              TARGET_CFLAGS := -target arm64-apple-ios -isysroot $(THEOS)/sdks/iPhoneOS16.5.sdk
-            endif
+          TARGET_CC := $(HOME)/toolchain/usr/bin/clang
+          TARGET_CXX := $(HOME)/toolchain/usr/bin/clang++
+          TARGET_STRIP := $(HOME)/toolchain/usr/bin/strip
+          TARGET_CODESIGN := $(HOME)/toolchain/usr/bin/ldid
+          TARGET_CFLAGS := -target arm64-apple-ios15.0 -isysroot $(THEOS)/sdks/iPhoneOS16.5.sdk
+          TARGET_LDFLAGS := -target arm64-apple-ios15.0 -isysroot $(THEOS)/sdks/iPhoneOS16.5.sdk
           endif
           EOF
 
-      # 5. 复制 SDK 到 Theos 目录
-      - name: 配置 SDK
-        run: |
-          cp -r ~/sdks/*.sdk ~/theos/sdks/ 2>/dev/null || true
-          ls -la ~/theos/sdks/
-
-      # 6. 生成插件源码
       - name: 生成插件源码
         run: |
           mkdir -p vintedisoui/Resources
 
-          cat > Makefile << 'MAKEFILE_END'
+          cat > Makefile << 'EOF'
           TARGET := iphone:clang:latest:15.0
           INSTALL_TARGET_PROCESSES = Vinted
           ARCHS = arm64
-          GO_EASY_ON_ME = 1
           include $(THEOS)/makefiles/common.mk
           TWEAK_NAME = VintedIsolator
           VintedIsolator_FILES = Tweak.x
-          VintedIsolator_FRAMEWORKS = UIKit Security Foundation
+          VintedIsolator_FRAMEWORKS = UIKit Security
           include $(THEOS)/makefiles/tweak.mk
           SUBPROJECTS += vintedisoui
           include $(THEOS)/makefiles/aggregate.mk
-          MAKEFILE_END
+          EOF
 
-          cat > control << 'CONTROL_END'
+          cat > control << 'EOF'
           Package: com.vinted.isolator
-          Name: Vinted分身隔离系统
-          Depends: mobilesubstrate, preferenceloader
+          Name: Vinted分身隔离
           Version: 3.0.0
           Architecture: iphoneos-arm64
-          Description: Linux交叉编译版分身隔离插件
           Section: Tweaks
-          CONTROL_END
+          EOF
 
-          cat > VintedIsolator.plist << 'PLIST_END'
-          {
-            Filter = {
-              Bundles = ("fr.vinted.vinted");
-            };
-          }
-          PLIST_END
+          cat > VintedIsolator.plist << 'EOF'
+          { Filter = { Bundles = ("fr.vinted.vinted"); }; }
+          EOF
 
-          # --- Tweak.x 内容 (保持之前完整版本，此处为了简洁省略) ---
-          # 注意：请将之前完整版 Tweak.x 的内容粘贴在此处
-          # 由于代码长度限制，请参考之前的完整版
-
-          echo "⚠️ 请手动补充 Tweak.x 完整内容"
-          # 为防止复制时遗漏，下面提供一个可工作的最小化版本
           cat > Tweak.x << 'TWEAK_END'
           #import <UIKit/UIKit.h>
+          #import <Security/Security.h>
+
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
+          static NSString* getSlot() {
+              NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+              NSString *s = p[@"activeSlot"];
+              return s.length ? s : @"Default";
+          }
+
           %hook UIDevice
-          - (NSUUID *)identifierForVendor { return %orig; }
+          - (NSUUID *)identifierForVendor {
+              NSString *path = [NSString stringWithFormat:@"%@/%@/idfv.txt", kSlotsBasePath, getSlot()];
+              NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+              return fake ? [[NSUUID alloc] initWithUUIDString:fake] : %orig;
+          }
           %end
-          %ctor { %init; }
+
+          %hook ASIdentifierManager
+          - (NSUUID *)advertisingIdentifier {
+              NSString *path = [NSString stringWithFormat:@"%@/%@/idfa.txt", kSlotsBasePath, getSlot()];
+              NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+              return fake ? [[NSUUID alloc] initWithUUIDString:fake] : %orig;
+          }
+          - (BOOL)isAdvertisingTrackingEnabled { return NO; }
+          %end
+
+          %ctor {
+              %init;
+              [[NSFileManager defaultManager] createDirectoryAtPath:kSlotsBasePath withIntermediateDirectories:YES attributes:nil error:nil];
+              NSString *def = [NSString stringWithFormat:@"%@/Default", kSlotsBasePath];
+              if (![[NSFileManager defaultManager] fileExistsAtPath:def]) {
+                  [[NSFileManager defaultManager] createDirectoryAtPath:def withIntermediateDirectories:YES attributes:nil error:nil];
+                  [@"00000000-0000-0000-0000-000000000001" writeToFile:[NSString stringWithFormat:@"%@/idfv.txt", def] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                  [@"00000000-0000-0000-0000-000000000002" writeToFile:[NSString stringWithFormat:@"%@/idfa.txt", def] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+              }
+          }
           TWEAK_END
 
-          cat > vintedisoui/Makefile << 'UI_MAKEFILE'
+          cat > vintedisoui/Makefile << 'EOF'
           include $(THEOS)/makefiles/common.mk
           BUNDLE_NAME = VintedIsoUI
           VintedIsoUI_FILES = RootListController.m
           VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
-          VintedIsoUI_FRAMEWORKS = UIKit
           include $(THEOS)/makefiles/bundle.mk
-          UI_MAKEFILE
+          EOF
 
-          cat > vintedisoui/RootListController.m << 'UI_M_END'
+          cat > vintedisoui/RootListController.m << 'EOF'
           #import <Preferences/PSListController.h>
-          @interface VintedRootListController : PSListController
-          @end
-          @implementation VintedRootListController
+          #import <spawn.h>
+          #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
+          #define kSlotsBasePath @"/var/mobile/VintedSlots"
+
+          @interface RLC : PSListController @end
+          @implementation RLC
           - (NSArray *)specifiers {
               if (!_specifiers) {
-                  _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+                  NSMutableArray *s = [NSMutableArray array];
+                  [s addObject:[PSSpecifier groupSpecifierWithName:@"分身管理"]];
+                  PSSpecifier *add = [PSSpecifier preferenceSpecifierWithName:@"新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                  add.buttonAction = @selector(newSlot);
+                  [s addObject:add];
+                  for (NSString *slot in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil]) {
+                      if ([slot hasPrefix:@"."]) continue;
+                      PSSpecifier *sp = [PSSpecifier preferenceSpecifierWithName:slot target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                      sp.buttonAction = @selector(switchTo:);
+                      [sp setProperty:slot forKey:@"slot"];
+                      [s addObject:sp];
+                  }
+                  _specifiers = s;
               }
               return _specifiers;
           }
+          - (void)newSlot {
+              UIAlertController *a = [UIAlertController alertControllerWithTitle:@"新建分身" message:@"名称" preferredStyle:UIAlertControllerStyleAlert];
+              [a addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = @"名称"; }];
+              [a addAction:[UIAlertAction actionWithTitle:@"创建" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                  NSString *name = a.textFields.firstObject.text;
+                  if (name.length) {
+                      NSString *p = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
+                      [[NSFileManager defaultManager] createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+                      [self switchToSlotWithName:name];
+                  }
+              }]];
+              [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+              [self presentViewController:a animated:YES completion:nil];
+          }
+          - (void)switchTo:(PSSpecifier *)spec {
+              [self switchToSlotWithName:[spec propertyForKey:@"slot"]];
+          }
+          - (void)switchToSlotWithName:(NSString *)name {
+              NSMutableDictionary *p = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
+              p[@"activeSlot"] = name;
+              [p writeToFile:kPrefsPath atomically:YES];
+              const char *a[] = {"killall", "-9", "Vinted", NULL};
+              posix_spawn(NULL, "/usr/bin/killall", NULL, NULL, (char**)a, NULL);
+              _specifiers = nil;
+              [self reloadSpecifiers];
+          }
           @end
-          UI_M_END
+          EOF
 
-          cat > vintedisoui/Resources/Info.plist << 'INFO_END'
+          cat > vintedisoui/Resources/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
           <key>CFBundleExecutable</key><string>VintedIsoUI</string>
           <key>CFBundleIdentifier</key><string>com.vinted.isolator.ui</string>
           </dict></plist>
-          INFO_END
+          EOF
 
-          echo "✅ 源码生成完成"
-
-      # 7. 编译插件
       - name: 编译插件
         run: |
           export THEOS=~/theos
-          export PATH=~/ios-toolchain/bin:$THEOS/bin:$PATH
-          # 设置编译器路径
-          export CC=~/ios-toolchain/bin/arm-apple-darwin11-clang
-          export CXX=~/ios-toolchain/bin/arm-apple-darwin11-clang++
+          export PATH=$HOME/toolchain/usr/bin:$THEOS/bin:$PATH
           make package
 
-      # 8. 上传产物
-      - name: 上传deb包
+      - name: 上传deb
         uses: actions/upload-artifact@v4
         with:
-          name: VintedLinuxIsolator.deb
+          name: VintedPlugin.deb
           path: packages/*.deb
