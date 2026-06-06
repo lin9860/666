@@ -26,7 +26,7 @@ jobs:
           command: |
             mkdir -p vintedisoui/Resources
 
-            cat > Makefile << 'EOF'
+            cat > Makefile << "MAKEFILE_EOF"
             TARGET := iphone:clang:latest:15.0
             INSTALL_TARGET_PROCESSES = Vinted
             ARCHS = arm64 arm64e
@@ -37,27 +37,27 @@ jobs:
             include $(THEOS)/makefiles/tweak.mk
             SUBPROJECTS += vintedisoui
             include $(THEOS)/makefiles/aggregate.mk
-            EOF
+            MAKEFILE_EOF
 
-            cat > control << 'EOF'
+            cat > control << "CONTROL_EOF"
             Package: com.vinted.isolator
             Name: Vinted分身隔离系统
             Depends: mobilesubstrate, preferenceloader
             Version: 2.0.0
             Architecture: iphoneos-arm64
-            Description: 底层Hook分身隔离，支持无限分身
+            Description: 底层Hook分身隔离
             Section: Tweaks
-            EOF
+            CONTROL_EOF
 
-            cat > VintedIsolator.plist << 'EOF'
+            cat > VintedIsolator.plist << "PLIST_EOF"
             {
               Filter = {
-                Bundles = ("fr.vinted.vinted", "com.vinted.app");
+                Bundles = ("fr.vinted.vinted");
               };
             }
-            EOF
+            PLIST_EOF
 
-            cat > Tweak.x << 'EOF'
+            cat > Tweak.x << "TWEAK_EOF"
             #import <UIKit/UIKit.h>
             #import <Security/Security.h>
 
@@ -70,85 +70,32 @@ jobs:
                 return slot.length > 0 ? slot : @"Default";
             }
 
-            static NSString* getSlotConfigPath() {
-                NSString *slot = getActiveSlot();
-                return [NSString stringWithFormat:@"%@/%@/config.plist", kSlotsBasePath, slot];
-            }
-
             %hook UIDevice
             - (NSUUID *)identifierForVendor {
-                NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-                if (config[@"fakeIDFV"]) {
-                    return [[NSUUID alloc] initWithUUIDString:config[@"fakeIDFV"]];
+                NSString *slot = getActiveSlot();
+                NSString *path = [NSString stringWithFormat:@"%@/%@/idfv.txt", kSlotsBasePath, slot];
+                NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+                if (fake) {
+                    return [[NSUUID alloc] initWithUUIDString:fake];
                 }
                 return %orig;
-            }
-            - (NSString *)name {
-                NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-                return config[@"deviceName"] ?: @"iPhone";
             }
             %end
 
             %hook ASIdentifierManager
             - (NSUUID *)advertisingIdentifier {
-                NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:getSlotConfigPath()];
-                if (config[@"fakeIDFA"]) {
-                    return [[NSUUID alloc] initWithUUIDString:config[@"fakeIDFA"]];
-                }
-                return %orig;
-            }
-            - (BOOL)isAdvertisingTrackingEnabled { return NO; }
-            %end
-
-            #include <fcntl.h>
-            #include <stdarg.h>
-
-            static int (*orig_open)(const char *path, int oflag, ...);
-
-            int fake_open(const char *path, int oflag, ...) {
-                NSString *nsPath = [NSString stringWithUTF8String:path];
                 NSString *slot = getActiveSlot();
-
-                NSArray *redirectPaths = @[@"/Library/Caches", @"/Library/WebKit", @"/Library/Cookies", @"/Documents"];
-
-                for (NSString *rp in redirectPaths) {
-                    if ([nsPath containsString:rp]) {
-                        NSString *slotDir = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, slot];
-                        NSString *newPath = [slotDir stringByAppendingPathComponent:[nsPath lastPathComponent]];
-                        [[NSFileManager defaultManager] createDirectoryAtPath:slotDir
-                                                  withIntermediateDirectories:YES
-                                                                   attributes:nil
-                                                                        error:nil];
-                        va_list args;
-                        va_start(args, oflag);
-                        mode_t mode = va_arg(args, mode_t);
-                        va_end(args);
-                        return orig_open([newPath UTF8String], oflag, mode);
-                    }
-                }
-
-                va_list args;
-                va_start(args, oflag);
-                mode_t mode = va_arg(args, mode_t);
-                va_end(args);
-                return orig_open(path, oflag, mode);
-            }
-
-            %hookf(SecItemCopyMatching, OSStatus, CFDictionaryRef query, CFTypeRef *result) {
-                NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-                if ([prefs[@"needWipeKeychain"] boolValue]) {
-                    NSArray *classes = @[(__bridge id)kSecClassGenericPassword, (__bridge id)kSecClassInternetPassword];
-                    for (id cls in classes) {
-                        NSDictionary *clearQuery = @{(__bridge id)kSecClass: cls};
-                        SecItemDelete((__bridge CFDictionaryRef)clearQuery);
-                    }
-                    NSMutableDictionary *mutablePrefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
-                    mutablePrefs[@"needWipeKeychain"] = @NO;
-                    [mutablePrefs writeToFile:kPrefsPath atomically:YES];
-                    return errSecItemNotFound;
+                NSString *path = [NSString stringWithFormat:@"%@/%@/idfa.txt", kSlotsBasePath, slot];
+                NSString *fake = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+                if (fake) {
+                    return [[NSUUID alloc] initWithUUIDString:fake];
                 }
                 return %orig;
             }
+            - (BOOL)isAdvertisingTrackingEnabled {
+                return NO;
+            }
+            %end
 
             %ctor {
                 @autoreleasepool {
@@ -165,37 +112,34 @@ jobs:
                                                       withIntermediateDirectories:YES
                                                                        attributes:nil
                                                                             error:nil];
-                            NSString *configPath = [NSString stringWithFormat:@"%@/config.plist", defaultSlot];
-                            NSDictionary *config = @{
-                                @"fakeIDFV": [[NSUUID UUID] UUIDString],
-                                @"fakeIDFA": [[NSUUID UUID] UUIDString],
-                                @"deviceName": @"iPhone 15 Pro"
-                            };
-                            [config writeToFile:configPath atomically:YES];
+                            [@"00000000-0000-0000-0000-000000000001" writeToFile:[NSString stringWithFormat:@"%@/idfv.txt", defaultSlot]
+                                                                      atomically:YES
+                                                                        encoding:NSUTF8StringEncoding
+                                                                           error:nil];
+                            [@"00000000-0000-0000-0000-000000000002" writeToFile:[NSString stringWithFormat:@"%@/idfa.txt", defaultSlot]
+                                                                      atomically:YES
+                                                                        encoding:NSUTF8StringEncoding
+                                                                           error:nil];
                         }
-
-                        MSHookFunction((void *)open, (void *)fake_open, (void **)&orig_open);
                         %init;
                     }
                 }
             }
-            EOF
+            TWEAK_EOF
 
-            cat > vintedisoui/Makefile << 'EOF'
+            cat > vintedisoui/Makefile << "UI_MAKEFILE"
             include $(THEOS)/makefiles/common.mk
             BUNDLE_NAME = VintedIsoUI
             VintedIsoUI_FILES = RootListController.m
             VintedIsoUI_INSTALL_PATH = /Library/PreferenceBundles
-            VintedIsoUI_FRAMEWORKS = UIKit CoreGraphics Foundation
-            VintedIsoUI_PRIVATE_FRAMEWORKS = Preferences
+            VintedIsoUI_FRAMEWORKS = UIKit
             include $(THEOS)/makefiles/bundle.mk
-            EOF
+            UI_MAKEFILE
 
-            cat > vintedisoui/RootListController.m << 'EOF'
+            cat > vintedisoui/RootListController.m << "UI_M_EOF"
             #import <Preferences/PSListController.h>
             #import <Preferences/PSSpecifier.h>
             #import <spawn.h>
-            #include <sys/wait.h>
 
             #define kPrefsPath @"/var/mobile/Library/Preferences/com.vinted.isolator.plist"
             #define kSlotsBasePath @"/var/mobile/VintedSlots"
@@ -209,18 +153,18 @@ jobs:
                 if (!_specifiers) {
                     NSMutableArray *specs = [NSMutableArray array];
 
-                    [specs addObject:[PSSpecifier groupSpecifierWithName:@"🔧 分身管理"]];
+                    [specs addObject:[PSSpecifier groupSpecifierWithName:@"分身管理"]];
                     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
                     NSString *active = prefs[@"activeSlot"] ?: @"Default";
                     PSSpecifier *activeSpec = [PSSpecifier preferenceSpecifierWithName:@"当前分身" target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
                     [activeSpec setProperty:active forKey:@"staticText"];
                     [specs addObject:activeSpec];
 
-                    PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"➕ 新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                    PSSpecifier *addBtn = [PSSpecifier preferenceSpecifierWithName:@"新建分身" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
                     addBtn.buttonAction = @selector(createSlot);
                     [specs addObject:addBtn];
 
-                    [specs addObject:[PSSpecifier groupSpecifierWithName:@"📁 分身列表"]];
+                    [specs addObject:[PSSpecifier groupSpecifierWithName:@"分身列表"]];
                     NSArray *slots = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kSlotsBasePath error:nil];
                     for (NSString *slot in slots) {
                         if ([slot hasPrefix:@"."]) continue;
@@ -252,12 +196,6 @@ jobs:
                 NSString *path = [NSString stringWithFormat:@"%@/%@", kSlotsBasePath, name];
                 if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return;
                 [[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
-                NSDictionary *config = @{
-                    @"fakeIDFV": [[NSUUID UUID] UUIDString],
-                    @"fakeIDFA": [[NSUUID UUID] UUIDString],
-                    @"deviceName": @"iPhone 15 Pro"
-                };
-                [config writeToFile:[NSString stringWithFormat:@"%@/config.plist", path] atomically:YES];
                 [self switchToSlotWithName:name];
             }
 
@@ -268,63 +206,37 @@ jobs:
             - (void)switchToSlotWithName:(NSString *)name {
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary dictionary];
                 prefs[@"activeSlot"] = name;
-                prefs[@"needWipeKeychain"] = @YES;
                 [prefs writeToFile:kPrefsPath atomically:YES];
-
                 const char *args[] = {"killall", "-9", "Vinted", NULL};
-                pid_t pid;
-                posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, NULL);
-                waitpid(pid, NULL, 0);
-
+                posix_spawn(NULL, "/usr/bin/killall", NULL, NULL, (char* const*)args, NULL);
                 _specifiers = nil;
                 [self reloadSpecifiers];
             }
             @end
-            EOF
+            UI_M_EOF
 
-            cat > vintedisoui/Resources/Info.plist << 'EOF'
+            cat > vintedisoui/Resources/Info.plist << "INFO_EOF"
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
-            <dict>
-                <key>CFBundleExecutable</key>
-                <string>VintedIsoUI</string>
-                <key>CFBundleIdentifier</key>
-                <string>com.vinted.isolator.ui</string>
-                <key>CFBundleName</key>
-                <string>Vinted隔离</string>
-                <key>CFBundleShortVersionString</key>
-                <string>2.0.0</string>
-            </dict>
-            </plist>
-            EOF
+            <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>VintedIsoUI</string>
+            <key>CFBundleIdentifier</key><string>com.vinted.isolator.ui</string>
+            </dict></plist>
+            INFO_EOF
 
-            echo "✅ 源码生成完成"
+            echo "源码生成完成"
 
       - run:
           name: 编译插件
           command: |
-            export THEOS=~/theos
-            export PATH=$THEOS/bin:$PATH
+            source $BASH_ENV
             make package
-
-      - run:
-          name: 查看产物
-          command: |
-            ls -la packages/ || echo "packages目录不存在"
-            if [ -d "packages" ]; then
-              echo "✅ 编译成功"
-            else
-              echo "❌ 编译失败"
-              exit 1
-            fi
 
       - store_artifacts:
           path: packages
-          destination: deb-packages
 
 workflows:
   version: 2
-  build_and_package:
+  build:
     jobs:
       - build
