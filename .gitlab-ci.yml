@@ -1,0 +1,45 @@
+# .gitlab-ci.yml - Vinted插件编译
+
+variables:
+  THEOS: "$CI_PROJECT_DIR/theos"
+
+cache:
+  key: theos-cache
+  paths:
+    - theos/
+    - sdks/
+
+before_script:
+  # 安装 Theos
+  - if [ ! -d "$THEOS" ]; then
+      git clone --depth 1 https://github.com/theos/theos.git $THEOS;
+    fi
+  - export THEOS=$THEOS
+  - export PATH=$THEOS/bin:$PATH
+  
+  # 下载 SDK
+  - |
+    if [ ! -d "sdks/iPhoneOS16.5.sdk" ]; then
+      mkdir -p sdks
+      git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git sdks-repo
+      cp -r sdks-repo/iPhoneOS16.5.sdk sdks/ 2>/dev/null || true
+      cp -r sdks-repo/iPhoneOS15.0.sdk sdks/ 2>/dev/null || true
+      rm -rf sdks-repo
+    fi
+  - mkdir -p $THEOS/sdks
+  - cp -r sdks/*.sdk $THEOS/sdks/ 2>/dev/null || true
+  - chmod +x build.sh
+
+stages:
+  - build
+
+build:
+  stage: build
+  tags:
+    - saas-macos-medium-m1
+  script:
+    - ./build.sh
+  artifacts:
+    paths:
+      - packages/*.deb
+    expire_in: 1 week
